@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  # Python-based OPC-UA server
+  opcua-test-server:
+    image: python:3.11-slim
+    container_name: opcua-test-server
+    ports:
+      - "4840:4840"
+    volumes:
+      - ./scripts:/app/scripts
+    working_dir: /app
+    command: |
+      bash -c "
+      pip install opcua-asyncio==1.0.6 && 
+      python scripts/test_server.py
+      "
+    restart: unless-stopped
