@@ -508,7 +508,12 @@ fn read_variable_value_sync(session: &opcua::client::prelude::Session, node_id: 
                         return Ok(format!("Error({})", status));
                     }
                 } else {
-                    return Ok("No status".to_string());
+                    // According to OPC-UA spec, None status typically means Good
+                    if let Some(value) = &result.value {
+                        return Ok(format_value(value));
+                    } else {
+                        return Ok("null".to_string());
+                    }
                 }
             }
             Ok("No result".to_string())
