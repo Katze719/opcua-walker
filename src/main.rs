@@ -789,6 +789,47 @@ fn read_single_node_info(
                     } else if verbose {
                         println!("  {} (read failed): {:?}", attr_name.dimmed(), status);
                     }
+                } else {
+                    // Handle None status according to OPC-UA spec (treat as Good)
+                    if let Some(value) = &result.value {
+                        // Just handle the Value attribute for now since that's what the user cares about
+                        if *attr_name == "Value" {
+                            println!("  Value: {}", format_value(value).bright_white());
+                            println!("  Value Type: {}", get_variant_type_name(value).bright_yellow());
+                            
+                            // Show timestamps if available
+                            if let Some(source_ts) = &result.source_timestamp {
+                                println!(
+                                    "  Source Timestamp: {}",
+                                    source_ts
+                                        .as_chrono()
+                                        .format("%Y-%m-%d %H:%M:%S UTC")
+                                        .to_string()
+                                        .dimmed()
+                                );
+                            }
+                            if let Some(server_ts) = &result.server_timestamp {
+                                println!(
+                                    "  Server Timestamp: {}",
+                                    server_ts
+                                        .as_chrono()
+                                        .format("%Y-%m-%d %H:%M:%S UTC")
+                                        .to_string()
+                                        .dimmed()
+                                );
+                            }
+                        } else if verbose {
+                            // For other attributes, use the existing format_value function
+                            println!("  {}: {}", attr_name.bright_blue(), format_value(value));
+                        }
+                    } else {
+                        // Value is None - show appropriate message
+                        if *attr_name == "Value" {
+                            println!("  Value: {}", "null".dimmed());
+                        } else if verbose {
+                            println!("  {}: {}", attr_name.dimmed(), "null".dimmed());
+                        }
+                    }
                 }
             }
             
