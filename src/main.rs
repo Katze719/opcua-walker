@@ -4,6 +4,7 @@ use colored::*;
 use opcua::client::prelude::*;
 use opcua::sync::RwLock;
 use std::sync::Arc;
+use std::str::FromStr;
 
 #[derive(Parser)]
 #[command(name = "opcua-walker")]
@@ -80,33 +81,49 @@ fn main() -> Result<()> {
     let mut client = ClientBuilder::new()
         .application_name("OPC-UA Walker")
         .application_uri("urn:opcua-walker")
-        .create_sample_keypair(true)
         .trust_server_certs(true)
         .session_retry_limit(3)
         .client()
         .ok_or_else(|| anyhow::anyhow!("Failed to create OPC-UA client"))?;
 
+    if cli.verbose {
+        println!("Connecting to endpoint: {}", cli.endpoint);
+    }
+
     // Create session with appropriate authentication
     let session = match auth_method {
-        AuthMethod::Anonymous => client.connect_to_endpoint(
-            (
-                cli.endpoint.as_ref(),
-                SecurityPolicy::None.to_str(),
-                MessageSecurityMode::None,
-                UserTokenPolicy::anonymous(),
-            ),
-            IdentityToken::Anonymous,
-        )?,
-        AuthMethod::UsernamePassword(username, password) => client.connect_to_endpoint(
-            (
-                cli.endpoint.as_ref(),
-                SecurityPolicy::None.to_str(),
-                MessageSecurityMode::None,
-                UserTokenPolicy::anonymous(),
-            ),
-            IdentityToken::UserName(username, password),
-        )?,
+        AuthMethod::Anonymous => {
+            if cli.verbose {
+                println!("Using anonymous authentication");
+            }
+            client.connect_to_endpoint(
+                (
+                    cli.endpoint.as_ref(),
+                    SecurityPolicy::None.to_str(),
+                    MessageSecurityMode::None,
+                    UserTokenPolicy::anonymous(),
+                ),
+                IdentityToken::Anonymous,
+            ).map_err(|e| anyhow::anyhow!("Connection failed: {:?}", e))?
+        },
+        AuthMethod::UsernamePassword(username, password) => {
+            if cli.verbose {
+                println!("Using username/password authentication for user: {}", username);
+            }
+            client.connect_to_endpoint(
+                (
+                    cli.endpoint.as_ref(),
+                    SecurityPolicy::None.to_str(),
+                    MessageSecurityMode::None,
+                    UserTokenPolicy::anonymous(),
+                ),
+                IdentityToken::UserName(username, password),
+            ).map_err(|e| anyhow::anyhow!("Connection failed: {:?}", e))?
+        },
         AuthMethod::Certificate(cert_path, key_path) => {
+            if cli.verbose {
+                println!("Using X.509 certificate authentication");
+            }
             // Use paths directly for X.509 authentication
             let cert_path_buf = std::path::PathBuf::from(&cert_path);
             let key_path_buf = std::path::PathBuf::from(&key_path);
@@ -127,9 +144,13 @@ fn main() -> Result<()> {
                     UserTokenPolicy::anonymous(),
                 ),
                 IdentityToken::X509(cert_path_buf, key_path_buf),
-            )?
+            ).map_err(|e| anyhow::anyhow!("Connection failed: {:?}", e))?
         }
     };
+
+    if cli.verbose {
+        println!("Successfully connected to OPC-UA server");
+    }
 
     match &cli.command {
         Commands::Discover => {
@@ -342,36 +363,145 @@ fn browse_address_space(
 fn browse_simple(
     session: &opcua::client::prelude::Session,
     start_node: &str,
-    _max_depth: u32,
+    max_depth: u32,
     verbose: bool,
 ) -> Result<usize> {
-    // Simple browse implementation that shows basic structure
     println!("\n{}", "🌳 Address Space Structure".bright_blue().bold());
 
-    // Try to browse some standard well-known nodes
-    let standard_nodes = vec![
-        ("Objects", "ns=0;i=85"),
-        ("Server", "ns=0;i=2253"),
-        ("Types", "ns=0;i=86"),
-        ("Views", "ns=0;i=87"),
-    ];
-
+    // Parse the starting node ID
+    let start_node_id = parse_node_id(start_node)?;
+    
     let mut found_count = 0;
-
-    for (name, node_id) in &standard_nodes {
-        if read_node_info(session, node_id, name, verbose).is_ok() {
-            found_count += 1;
+    let mut nodes_to_browse = vec![(start_node_id.clone(), 0)]; // (node_id, depth)
+    let mut browsed_nodes = std::collections::HashSet::new();
+    
+    while let Some((node_id, depth)) = nodes_to_browse.pop() {
+        if depth > max_depth {
+            continue;
         }
-    }
+        
+        // Avoid infinite loops by tracking browsed nodes
+        let node_key = format!("{:?}", node_id);
+        if browsed_nodes.contains(&node_key) {
+            continue;
+        }
+        browsed_nodes.insert(node_key);
 
-    // Try to read the start node if it's different
-    if !standard_nodes.iter().any(|(_, id)| *id == start_node) {
-        if read_node_info(session, start_node, "Start Node", verbose).is_ok() {
-            found_count += 1;
+        if verbose {
+            println!("📍 Browsing node: {:?} at depth {}", node_id, depth);
+        }
+
+        // Create browse request
+        let browse_description = BrowseDescription {
+            node_id: node_id.clone(),
+            browse_direction: BrowseDirection::Forward,
+            reference_type_id: ReferenceTypeId::HierarchicalReferences.into(),
+            include_subtypes: true,
+            node_class_mask: 0, // All node classes
+            result_mask: 0x3F, // All result mask bits
+        };
+
+        match session.browse(&[browse_description]) {
+            Ok(Some(results)) => {
+                if let Some(result) = results.first() {
+                    if result.status_code.is_good() {
+                        if let Some(ref references) = result.references {
+                            let indent = "  ".repeat(depth as usize);
+                            
+                            if depth == 0 {
+                                // Show the starting node itself
+                                println!("{}📁 {} ({})", 
+                                    indent, 
+                                    "Starting Node".bright_white(), 
+                                    start_node.dimmed()
+                                );
+                                found_count += 1;
+                            }
+                            
+                            for reference in references {
+                                let node_class_icon = match reference.node_class {
+                                    NodeClass::Object => "📁",
+                                    NodeClass::Variable => "📊",
+                                    NodeClass::Method => "⚡",
+                                    NodeClass::ObjectType => "🏷️",
+                                    NodeClass::VariableType => "🔖",
+                                    NodeClass::ReferenceType => "🔗",
+                                    NodeClass::DataType => "📝",
+                                    NodeClass::View => "👁️",
+                                    _ => "❓",
+                                };
+                                
+                                let display_name = reference.display_name.text.as_ref();
+                                
+                                let node_id_str = format!("{}", reference.node_id.node_id);
+                                
+                                println!("{}  {} {} ({})", 
+                                    indent,
+                                    node_class_icon,
+                                    display_name.bright_white(),
+                                    node_id_str.dimmed()
+                                );
+                                
+                                found_count += 1;
+                                
+                                // Add child nodes to browse queue if we haven't reached max depth
+                                if depth < max_depth {
+                                    nodes_to_browse.push((reference.node_id.node_id.clone(), depth + 1));
+                                }
+                                
+                                // If it's a variable, try to read its value
+                                if reference.node_class == NodeClass::Variable && verbose {
+                                    if let Ok(value) = read_variable_value_sync(session, &node_id_str) {
+                                        println!("{}     💠 Value: {}", 
+                                            indent, 
+                                            value.bright_cyan()
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        if verbose {
+                            println!("❌ Browse failed for {:?}: {:?}", node_id, result.status_code);
+                        }
+                    }
+                }
+            }
+            Ok(None) => {
+                if verbose {
+                    println!("❌ Browse returned no results for {:?}", node_id);
+                }
+            }
+            Err(e) => {
+                if verbose {
+                    println!("❌ Browse error for {:?}: {}", node_id, e);
+                }
+            }
         }
     }
 
     Ok(found_count)
+}
+
+fn read_variable_value_sync(session: &opcua::client::prelude::Session, node_id: &str) -> Result<String> {
+    let node = parse_node_id(node_id)?;
+    let read_request = vec![ReadValueId::from(&node)];
+    
+    match session.read(&read_request, TimestampsToReturn::Neither, 0.0) {
+        Ok(results) => {
+            if let Some(result) = results.first() {
+                if let Some(status) = &result.status {
+                    if status.is_good() {
+                        if let Some(value) = &result.value {
+                            return Ok(format_value(value));
+                        }
+                    }
+                }
+            }
+            Ok("N/A".to_string())
+        }
+        Err(_) => Ok("N/A".to_string()),
+    }
 }
 
 fn read_node_info(
@@ -490,7 +620,7 @@ fn read_variable_value(session: Arc<RwLock<Session>>, node_id: &str, verbose: bo
 }
 
 fn parse_node_id(node_id: &str) -> Result<NodeId> {
-    // Simple node ID parser for common formats
+    // Handle different node ID formats
     if node_id.starts_with("ns=") {
         if let Some(semicolon_pos) = node_id.find(';') {
             let ns_part = &node_id[3..semicolon_pos];
@@ -510,6 +640,20 @@ fn parse_node_id(node_id: &str) -> Result<NodeId> {
                 // String identifier
                 let id = id_part[2..].to_string();
                 Ok(NodeId::new(namespace, id))
+            } else if id_part.starts_with("g=") {
+                // GUID identifier
+                let guid_str = &id_part[2..];
+                let guid = opcua::types::Guid::from_str(guid_str)
+                    .map_err(|_| anyhow::anyhow!("Invalid GUID: {}", node_id))?;
+                Ok(NodeId::new(namespace, guid))
+            } else if id_part.starts_with("b=") {
+                // ByteString identifier (base64 encoded)
+                let bytes_str = &id_part[2..];
+                use base64::Engine;
+                match base64::engine::general_purpose::STANDARD.decode(bytes_str) {
+                    Ok(bytes) => Ok(NodeId::new(namespace, opcua::types::ByteString::from(bytes))),
+                    Err(_) => Err(anyhow::anyhow!("Invalid base64 ByteString: {}", node_id))
+                }
             } else {
                 Err(anyhow::anyhow!(
                     "Unsupported node ID identifier type: {}",
@@ -519,8 +663,23 @@ fn parse_node_id(node_id: &str) -> Result<NodeId> {
         } else {
             Err(anyhow::anyhow!("Invalid node ID format: {}", node_id))
         }
+    } else if node_id.starts_with("i=") {
+        // Simple numeric format without namespace (assumes ns=0)
+        let id = node_id[2..]
+            .parse::<u32>()
+            .map_err(|_| anyhow::anyhow!("Invalid numeric ID: {}", node_id))?;
+        Ok(NodeId::new(0, id))
+    } else if node_id.starts_with("s=") {
+        // Simple string format without namespace (assumes ns=0)
+        let id = node_id[2..].to_string();
+        Ok(NodeId::new(0, id))
     } else {
-        Err(anyhow::anyhow!("Unsupported node ID format: {}", node_id))
+        // Try to parse as a simple numeric value
+        if let Ok(id) = node_id.parse::<u32>() {
+            Ok(NodeId::new(0, id))
+        } else {
+            Err(anyhow::anyhow!("Unsupported node ID format: {}", node_id))
+        }
     }
 }
 
