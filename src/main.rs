@@ -1563,17 +1563,20 @@ fn search_for_method(
     verbose: bool,
 ) -> Result<(NodeId, NodeId)> {
     println!("\n{}", "🔍 Searching for method...".bright_blue());
+    
     let found_methods = search_methods_by_name(session, method_id, verbose)?;
     
     if found_methods.is_empty() {
-        return Err(anyhow::anyhow!(
-            "No methods found with name: '{}'\n\n  💡 Troubleshooting steps:\n     1. Use 'browse' to explore the server: opcua-walker browse\n     2. Look for methods in the address space\n     3. Use exact node IDs: opcua-walker call \"ns=X;s=MethodName\" \"ns=X;s=ObjectName\"\n     4. Try with --verbose for detailed search info: opcua-walker call \"{}\" --verbose", 
+        // Provide comprehensive troubleshooting guidance
+        let error_msg = format!(
+            "No methods found with name: '{}'\n\n  💡 Troubleshooting steps:\n     1. Use 'browse' to explore the server and find available methods:\n        opcua-walker browse\n     2. Look for the method in different server areas:\n        opcua-walker browse --node \"ns=0;i=85\"  # Objects folder\n        opcua-walker browse --node \"ns=0;i=2253\" # Server node\n     3. Try searching with partial names or check for typos:\n        opcua-walker call \"reboot\" --verbose  # case-insensitive\n        opcua-walker call \"restart\" --verbose # alternative name\n     4. Use exact node IDs if you know them:\n        opcua-walker call \"ns=X;s=MethodName\" \"ns=X;s=ObjectName\"\n     5. Check if the method might be in a namespace other than 0:\n        opcua-walker browse --all-attributes\n     6. Enable verbose mode for detailed search diagnostics:\n        opcua-walker call \"{}\" --verbose\n\n  🔍 The search looked in:\n     • Objects folder (ns=0;i=85)\n     • Server node (ns=0;i=2253)\n     • Server capabilities and diagnostics\n     • Up to 200 nodes in the address space\n\n  ⚠️  If the method exists but wasn't found, it might be:\n     • In a custom namespace (ns=1, ns=2, etc.)\n     • Deeper in the hierarchy than searched\n     • Referenced through non-standard references\n     • Requires special permissions to access", 
             method_id, method_id
-        ));
+        );
+        return Err(anyhow::anyhow!(error_msg));
     }
     
     if found_methods.len() > 1 {
-        println!("Found {} methods with name '{}':", found_methods.len(), method_id);
+        println!("✅ Found {} methods with name '{}':", found_methods.len(), method_id);
         for (i, (_method_node, object_node, object_name)) in found_methods.iter().enumerate() {
             println!("  [{}] {} on object: {} ({})", 
                 i + 1,
@@ -1601,42 +1604,76 @@ fn search_methods_by_name(
     method_name: &str,
     verbose: bool,
 ) -> Result<Vec<(NodeId, NodeId, String)>> {
-    let mut found_methods = Vec::new();
-    let mut nodes_to_browse = vec![NodeId::new(0, 85)]; // Start from Objects folder
+    // Try a more comprehensive search strategy
+    if verbose {
+        println!("    🔄 Starting comprehensive method search...");
+    }
+    
+    // First try: Quick search with original limits
+    if let Ok(methods) = search_methods_with_limits(session, method_name, 50, 20, verbose) {
+        if !methods.is_empty() {
+            return Ok(methods);
+        }
+    }
+    
+    if verbose {
+        println!("    🔄 Quick search found no results, expanding search...");
+    }
+    
+    // Second try: Broader search with increased limits
+    if let Ok(methods) = search_methods_with_limits(session, method_name, 200, 50, verbose) {
+        if !methods.is_empty() {
+            return Ok(methods);
+        }
+    }
+    
+    if verbose {
+        println!("    🔄 Broad search found no results, trying exhaustive search...");
+    }
+    
+    // Third try: More exhaustive search
+    search_methods_exhaustive(session, method_name, verbose)
+}
+
+fn search_methods_with_limits(
+    session: &opcua::client::prelude::Session,
+    method_name: &str,
+    max_nodes: usize,
+    max_queue: usize,
+    verbose: bool,
+) -> Result<Vec<(NodeId, NodeId, String)>> {
+    let mut found_methods: Vec<(NodeId, NodeId, String)> = Vec::new();
+    let mut nodes_to_browse = vec![
+        NodeId::new(0, 85),   // Objects folder
+        NodeId::new(0, 2253), // Server node
+        NodeId::new(0, 2254), // Server.ServerCapabilities
+        NodeId::new(0, 2268), // Server.ServerDiagnostics
+    ];
     let mut browsed_nodes = HashSet::new();
     
-    // Limit the search scope to prevent "BadTooManyOperations" errors
-    let max_nodes_to_browse = 50;  // Reduced from 1000
-    let max_queue_size = 20;       // Reduced from 100
-    
-    // Also search in Server node
-    nodes_to_browse.push(NodeId::new(0, 2253)); // Server
-    
     while let Some(node_id) = nodes_to_browse.pop() {
-        // Strict limits to avoid overwhelming the server
         let node_key = format!("{:?}", node_id);
-        if browsed_nodes.contains(&node_key) || browsed_nodes.len() >= max_nodes_to_browse {
+        if browsed_nodes.contains(&node_key) || browsed_nodes.len() >= max_nodes {
             continue;
         }
         browsed_nodes.insert(node_key);
         
-        if verbose {
-            println!("    🔍 Searching for methods in node: {:?} ({}/{})", 
-                node_id, browsed_nodes.len(), max_nodes_to_browse);
+        if verbose && browsed_nodes.len() % 10 == 0 {
+            println!("    🔍 Searched {} nodes...", browsed_nodes.len());
         }
         
-        // Create browse request with reduced result mask
+        // First browse for all child nodes (not just methods)
         let browse_description = BrowseDescription {
             node_id: node_id.clone(),
             browse_direction: BrowseDirection::Forward,
             reference_type_id: ReferenceTypeId::HierarchicalReferences.into(),
             include_subtypes: true,
-            node_class_mask: 0x02, // Only Method nodes (0x02 = Method)
-            result_mask: 0x0F, // Reduced result mask (NodeId, DisplayName, BrowseName, NodeClass)
+            node_class_mask: 0, // All node classes
+            result_mask: 0x3F, // All attributes
         };
         
-        // Add small delay to avoid overwhelming server
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        // Small delay to be gentle on the server
+        std::thread::sleep(std::time::Duration::from_millis(5));
         
         if let Ok(Some(results)) = session.browse(&[browse_description]) {
             if let Some(result) = results.first() {
@@ -1646,61 +1683,183 @@ fn search_methods_by_name(
                             let display_name = reference.display_name.text.as_ref();
                             let browse_name = &reference.browse_name.name;
                             
-                            // Check if this is a method node and the name matches
+                            // Check if this is a method and matches our search
                             if reference.node_class == NodeClass::Method {
                                 let exact_display_match = display_name.eq_ignore_ascii_case(method_name);
                                 let exact_browse_match = browse_name.to_string().eq_ignore_ascii_case(method_name);
                                 let partial_display_match = display_name.to_lowercase().contains(&method_name.to_lowercase());
                                 let partial_browse_match = browse_name.to_string().to_lowercase().contains(&method_name.to_lowercase());
                                 
-                                // Prioritize exact matches
                                 if exact_display_match || exact_browse_match || partial_display_match || partial_browse_match {
-                                    // Found a matching method, now we need to find its parent object
-                                    let parent_object_id = node_id.clone(); // The current node being browsed is the parent
-                                    
-                                    // Get the parent object's display name
+                                    let parent_object_id = node_id.clone();
                                     let parent_name = get_node_display_name(session, &parent_object_id)
                                         .unwrap_or_else(|_| format!("{}", parent_object_id));
                                     
                                     found_methods.push((
-                                        reference.node_id.node_id.clone(), // Method node ID
-                                        parent_object_id,                  // Parent object node ID
-                                        parent_name.clone(),               // Parent object display name
+                                        reference.node_id.node_id.clone(),
+                                        parent_object_id,
+                                        parent_name.clone(),
                                     ));
                                     
                                     if verbose {
-                                        println!("    ✅ Found method: {} in object: {}", 
+                                        println!("    ✅ Found method: '{}' in object: '{}'", 
                                             display_name, parent_name);
                                     }
                                     
-                                    // If we found an exact match, prioritize it and stop searching
+                                    // Return immediately on exact match
                                     if exact_display_match || exact_browse_match {
                                         if verbose {
-                                            println!("    🎯 Found exact match, stopping search");
+                                            println!("    🎯 Exact match found, stopping search");
                                         }
                                         return Ok(found_methods);
                                     }
                                 }
                             }
                             
-                            // Add child nodes to search queue with strict limits
-                            if browsed_nodes.len() < max_nodes_to_browse && nodes_to_browse.len() < max_queue_size {
+                            // Add child nodes to queue if we have space
+                            if browsed_nodes.len() < max_nodes && nodes_to_browse.len() < max_queue {
                                 nodes_to_browse.push(reference.node_id.node_id.clone());
                             }
                         }
                     }
                 }
             }
-        } else {
-            // If browse fails, don't treat it as a fatal error, just continue
-            if verbose {
-                println!("    ⚠️  Browse failed for node: {:?}", node_id);
-            }
         }
     }
     
     if verbose {
-        println!("    📊 Searched {} nodes total", browsed_nodes.len());
+        println!("    📊 Search completed: {} nodes searched, {} methods found", 
+            browsed_nodes.len(), found_methods.len());
+    }
+    
+    Ok(found_methods)
+}
+
+fn search_methods_exhaustive(
+    session: &opcua::client::prelude::Session,
+    method_name: &str,
+    verbose: bool,
+) -> Result<Vec<(NodeId, NodeId, String)>> {
+    if verbose {
+        println!("    🚀 Starting exhaustive method search (this may take longer)...");
+    }
+    
+    // Use a different strategy: browse specific known areas where methods are typically found
+    let mut found_methods: Vec<(NodeId, NodeId, String)> = Vec::new();
+    let known_method_areas = vec![
+        (NodeId::new(0, 85), "Objects"),           // Objects folder
+        (NodeId::new(0, 2253), "Server"),         // Server
+        (NodeId::new(0, 2254), "ServerCapabilities"), // Server capabilities
+        (NodeId::new(0, 2268), "ServerDiagnostics"),  // Server diagnostics
+        (NodeId::new(0, 61), "Types"),            // Types folder (might contain method types)
+    ];
+    
+    for (start_node, area_name) in known_method_areas {
+        if verbose {
+            println!("    🔍 Searching in {} area...", area_name);
+        }
+        
+        if let Ok(methods) = search_area_for_methods(session, &start_node, method_name, verbose) {
+            found_methods.extend(methods);
+            if !found_methods.is_empty() {
+                break; // Found methods, no need to continue
+            }
+        }
+    }
+    
+    Ok(found_methods)
+}
+
+fn search_area_for_methods(
+    session: &opcua::client::prelude::Session,
+    start_node: &NodeId,
+    method_name: &str,
+    verbose: bool,
+) -> Result<Vec<(NodeId, NodeId, String)>> {
+    let mut found_methods: Vec<(NodeId, NodeId, String)> = Vec::new();
+    let mut nodes_to_browse = vec![start_node.clone()];
+    let mut browsed_nodes = HashSet::new();
+    let max_depth = 8; // Limit depth to prevent infinite loops
+    let mut current_depth = 0;
+    
+    while let Some(node_id) = nodes_to_browse.pop() {
+        if current_depth > max_depth {
+            break;
+        }
+        
+        let node_key = format!("{:?}", node_id);
+        if browsed_nodes.contains(&node_key) {
+            continue;
+        }
+        browsed_nodes.insert(node_key);
+        
+        // Browse this node for methods specifically
+        let browse_description = BrowseDescription {
+            node_id: node_id.clone(),
+            browse_direction: BrowseDirection::Forward,
+            reference_type_id: ReferenceTypeId::HasComponent.into(), // Try HasComponent reference
+            include_subtypes: true,
+            node_class_mask: 0x02, // Method nodes only for this specific browse
+            result_mask: 0x3F,
+        };
+        
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        
+        if let Ok(Some(results)) = session.browse(&[browse_description]) {
+            if let Some(result) = results.first() {
+                if result.status_code.is_good() {
+                    if let Some(ref references) = result.references {
+                        for reference in references {
+                            let display_name = reference.display_name.text.as_ref();
+                            
+                            if reference.node_class == NodeClass::Method &&
+                               (display_name.eq_ignore_ascii_case(method_name) ||
+                                display_name.to_lowercase().contains(&method_name.to_lowercase())) {
+                                
+                                let parent_name = get_node_display_name(session, &node_id)
+                                    .unwrap_or_else(|_| format!("{}", node_id));
+                                
+                                found_methods.push((
+                                    reference.node_id.node_id.clone(),
+                                    node_id.clone(),
+                                    parent_name.clone(),
+                                ));
+                                
+                                if verbose {
+                                    println!("    ✅ Found method '{}' in {}", display_name, parent_name);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Also browse for child objects that might contain methods
+        let browse_children = BrowseDescription {
+            node_id: node_id.clone(),
+            browse_direction: BrowseDirection::Forward,
+            reference_type_id: ReferenceTypeId::HierarchicalReferences.into(),
+            include_subtypes: true,
+            node_class_mask: 0x01, // Object nodes only
+            result_mask: 0x03, // Just NodeId and DisplayName
+        };
+        
+        if let Ok(Some(results)) = session.browse(&[browse_children]) {
+            if let Some(result) = results.first() {
+                if result.status_code.is_good() {
+                    if let Some(ref references) = result.references {
+                        for reference in references {
+                            if nodes_to_browse.len() < 100 { // Limit queue size
+                                nodes_to_browse.push(reference.node_id.node_id.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        current_depth += 1;
     }
     
     Ok(found_methods)
