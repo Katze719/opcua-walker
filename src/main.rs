@@ -169,26 +169,33 @@ fn main() -> Result<()> {
             // Validate certificate file extensions
             if let Some(cert_extension) = cert_path_buf.extension() {
                 let ext = cert_extension.to_string_lossy().to_lowercase();
-                if !["pem", "crt", "cer", "der"].contains(&ext.as_str()) {
+                if !["pem", "der"].contains(&ext.as_str()) {
                     if cli.verbose {
-                        println!("  ⚠️  Warning: Certificate file extension '{}' is uncommon. Supported: .pem, .crt, .cer, .der", ext);
+                        println!("  ⚠️  Warning: Certificate file extension '{}' is uncommon. Supported: .pem (text), .der (binary)", ext);
+                        println!("      Note: .crt and .cer files may work if they contain PEM or DER data");
                     }
                 }
                 if cli.verbose {
-                    println!("  📄 Certificate file: {} ({})", cert_path, ext);
+                    let format_type = match ext.as_str() {
+                        "der" => "binary DER format",
+                        "pem" => "text PEM format", 
+                        _ => "unknown format"
+                    };
+                    println!("  📄 Certificate file: {} ({}, {})", cert_path, ext, format_type);
                 }
             }
 
             // Validate key file extensions  
             if let Some(key_extension) = key_path_buf.extension() {
                 let ext = key_extension.to_string_lossy().to_lowercase();
-                if !["pem", "key", "der"].contains(&ext.as_str()) {
+                if !["pem", "key"].contains(&ext.as_str()) {
                     if cli.verbose {
-                        println!("  ⚠️  Warning: Private key file extension '{}' is uncommon. Supported: .pem, .key, .der", ext);
+                        println!("  ⚠️  Warning: Private key file extension '{}' is uncommon. Supported: .pem, .key (both in PEM text format)", ext);
+                        println!("      Note: DER format private keys are not supported by the OPC-UA library");
                     }
                 }
                 if cli.verbose {
-                    println!("  🔑 Private key file: {} ({})", key_path, ext);
+                    println!("  🔑 Private key file: {} ({}, PEM text format)", key_path, ext);
                 }
             }
 
