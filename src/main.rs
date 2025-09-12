@@ -63,7 +63,7 @@ enum Commands {
         #[arg(short, long)]
         all_attributes: bool,
         
-        /// Include node value (for variables)
+        /// Force include node value for all nodes (Variable nodes include values by default)
         #[arg(short = 'V', long)]
         include_value: bool,
     },
@@ -500,13 +500,23 @@ fn read_variable_value_sync(session: &opcua::client::prelude::Session, node_id: 
                     if status.is_good() {
                         if let Some(value) = &result.value {
                             return Ok(format_value(value));
+                        } else {
+                            return Ok("null".to_string());
                         }
+                    } else {
+                        // Provide more specific error information
+                        return Ok(format!("Error({})", status));
                     }
+                } else {
+                    return Ok("No status".to_string());
                 }
             }
-            Ok("N/A".to_string())
+            Ok("No result".to_string())
         }
-        Err(_) => Ok("N/A".to_string()),
+        Err(e) => {
+            // Provide more informative error message instead of just "N/A"
+            Ok(format!("ReadError: {}", e))
+        }
     }
 }
 
@@ -577,6 +587,34 @@ fn read_single_node_info(
     
     println!("  Node ID: {}", node_id.bright_cyan());
 
+    // First, read the node class to determine if it's a variable
+    let node_class_read = vec![ReadValueId {
+        node_id: node.clone(),
+        attribute_id: AttributeId::NodeClass as u32,
+        index_range: UAString::null(),
+        data_encoding: QualifiedName::null(),
+    }];
+    
+    let mut is_variable = false;
+    match session.read(&node_class_read, TimestampsToReturn::Neither, 0.0) {
+        Ok(results) => {
+            if let Some(result) = results.first() {
+                if let Some(status) = &result.status {
+                    if status.is_good() {
+                        if let Some(value) = &result.value {
+                            if let Variant::Int32(class_id) = value {
+                                is_variable = *class_id == 2; // NodeClass::Variable = 2
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Err(_) => {
+            // Can't determine node class, proceed without assuming it's a variable
+        }
+    }
+
     // Define which attributes to read based on mode
     let mut attributes_to_read = Vec::new();
     
@@ -601,9 +639,15 @@ fn read_single_node_info(
         attributes_to_read.push((AttributeId::Historizing, "Historizing"));
     }
     
-    // Add Value attribute if requested or if include_value is true
-    if include_value {
+    // Add Value attribute if explicitly requested, or if it's a variable (auto-include for variables)
+    if include_value || is_variable {
         attributes_to_read.push((AttributeId::Value, "Value"));
+        if is_variable && !include_value {
+            println!("  {} Automatically including value for Variable node", "💡".bright_blue());
+        }
+    } else if !is_variable && !include_value {
+        // Show a helpful message for non-variables when value is not included
+        println!("  {} Use --include-value to try reading value attribute for non-Variable nodes", "💡".bright_blue());
     }
 
     // Build read requests
