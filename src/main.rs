@@ -107,14 +107,14 @@ fn main() -> Result<()> {
         );
     }
 
-    // Configure client with more tolerant settings
+    // Configure client with more tolerant settings for various servers
     let mut client = ClientBuilder::new()
         .application_name("OPC-UA Walker")
         .application_uri("urn:opcua-walker")
         .create_sample_keypair(true)
         .trust_server_certs(true)
-        .max_message_size(8192000) // Increase message size limit
-        .max_chunk_count(1000)     // Increase chunk count
+        .session_retry_limit(3)
+        .session_retry_interval(5000)
         .client()
         .ok_or_else(|| anyhow::anyhow!("Failed to create OPC-UA client"))?;
 
