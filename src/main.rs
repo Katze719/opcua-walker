@@ -166,6 +166,32 @@ fn main() -> Result<()> {
                 return Err(anyhow::anyhow!("Private key file not found: {}", key_path));
             }
 
+            // Validate certificate file extensions
+            if let Some(cert_extension) = cert_path_buf.extension() {
+                let ext = cert_extension.to_string_lossy().to_lowercase();
+                if !["pem", "crt", "cer", "der"].contains(&ext.as_str()) {
+                    if cli.verbose {
+                        println!("  ⚠️  Warning: Certificate file extension '{}' is uncommon. Supported: .pem, .crt, .cer, .der", ext);
+                    }
+                }
+                if cli.verbose {
+                    println!("  📄 Certificate file: {} ({})", cert_path, ext);
+                }
+            }
+
+            // Validate key file extensions  
+            if let Some(key_extension) = key_path_buf.extension() {
+                let ext = key_extension.to_string_lossy().to_lowercase();
+                if !["pem", "key", "der"].contains(&ext.as_str()) {
+                    if cli.verbose {
+                        println!("  ⚠️  Warning: Private key file extension '{}' is uncommon. Supported: .pem, .key, .der", ext);
+                    }
+                }
+                if cli.verbose {
+                    println!("  🔑 Private key file: {} ({})", key_path, ext);
+                }
+            }
+
             client.connect_to_endpoint(
                 (
                     cli.endpoint.as_ref(),
@@ -1489,24 +1515,25 @@ fn search_nodes_by_name(
     verbose: bool,
 ) -> Result<Vec<(NodeId, String, NodeClass)>> {
     let mut found_nodes = Vec::new();
-    let mut nodes_to_browse = vec![NodeId::new(0, 85)]; // Start from Objects folder
+    let mut nodes_to_browse = vec![
+        NodeId::new(0, 85),   // Objects folder
+        NodeId::new(0, 2253), // Server node
+        NodeId::new(0, 86),   // Types folder
+    ];
     let mut browsed_nodes = HashSet::new();
-    let _max_search_depth = 5; // Limit search depth to avoid infinite loops
-    
-    // Also search in Server node and Types
-    nodes_to_browse.push(NodeId::new(0, 2253)); // Server
-    nodes_to_browse.push(NodeId::new(0, 86)); // Types
+    let max_nodes = 2000; // Increased limit for comprehensive search
+    let max_queue = 500;  // Increased queue limit to allow deeper exploration
     
     while let Some(node_id) = nodes_to_browse.pop() {
-        // Avoid infinite loops
+        // Avoid infinite loops and respect limits
         let node_key = format!("{:?}", node_id);
-        if browsed_nodes.contains(&node_key) || browsed_nodes.len() > 1000 {
+        if browsed_nodes.contains(&node_key) || browsed_nodes.len() >= max_nodes {
             continue;
         }
         browsed_nodes.insert(node_key);
         
-        if verbose {
-            println!("    🔍 Searching in node: {:?}", node_id);
+        if verbose && browsed_nodes.len() % 50 == 0 {
+            println!("    🔍 Searched {} nodes (ns={})...", browsed_nodes.len(), node_id.namespace);
         }
         
         // Create browse request
@@ -1518,6 +1545,9 @@ fn search_nodes_by_name(
             node_class_mask: 0, // All node classes
             result_mask: 0x3F, // All result mask bits
         };
+        
+        // Small delay to be gentle on the server
+        std::thread::sleep(std::time::Duration::from_millis(2));
         
         if let Ok(Some(results)) = session.browse(&[browse_description]) {
             if let Some(result) = results.first() {
@@ -1537,10 +1567,15 @@ fn search_nodes_by_name(
                                     display_name.to_string(),
                                     reference.node_class,
                                 ));
+                                
+                                if verbose {
+                                    println!("    ✅ Found: '{}' (ns={}, class: {:?})", 
+                                        display_name, reference.node_id.node_id.namespace, reference.node_class);
+                                }
                             }
                             
-                            // Add child nodes to search queue if we haven't reached max depth
-                            if browsed_nodes.len() < 500 && nodes_to_browse.len() < 100 {
+                            // Add ALL child nodes to search queue (cross-namespace discovery)
+                            if browsed_nodes.len() < max_nodes && nodes_to_browse.len() < max_queue {
                                 nodes_to_browse.push(reference.node_id.node_id.clone());
                             }
                         }
@@ -1551,7 +1586,8 @@ fn search_nodes_by_name(
     }
     
     if verbose {
-        println!("    📊 Searched {} nodes total", browsed_nodes.len());
+        println!("    📊 Search completed: {} nodes searched, {} matches found", 
+            browsed_nodes.len(), found_nodes.len());
     }
     
     Ok(found_nodes)
@@ -1604,35 +1640,13 @@ fn search_methods_by_name(
     method_name: &str,
     verbose: bool,
 ) -> Result<Vec<(NodeId, NodeId, String)>> {
-    // Use comprehensive search strategy similar to read --search
+    // Use the same comprehensive search strategy as read --search
     if verbose {
         println!("    🔄 Starting comprehensive method search across all namespaces...");
     }
     
-    // First try: Quick search with moderate limits
-    if let Ok(methods) = search_methods_with_limits(session, method_name, 100, 50, verbose) {
-        if !methods.is_empty() {
-            return Ok(methods);
-        }
-    }
-    
-    if verbose {
-        println!("    🔄 Quick search found no results, expanding search...");
-    }
-    
-    // Second try: Broader search with limits similar to read --search
-    if let Ok(methods) = search_methods_with_limits(session, method_name, 500, 100, verbose) {
-        if !methods.is_empty() {
-            return Ok(methods);
-        }
-    }
-    
-    if verbose {
-        println!("    🔄 Broad search found no results, trying exhaustive search...");
-    }
-    
-    // Third try: More exhaustive search
-    search_methods_exhaustive(session, method_name, verbose)
+    // Use consistent limits with read --search for reliable results
+    search_methods_with_limits(session, method_name, 2000, 500, verbose)
 }
 
 fn search_methods_with_limits(
@@ -1657,7 +1671,7 @@ fn search_methods_with_limits(
         }
         browsed_nodes.insert(node_key);
         
-        if verbose && browsed_nodes.len() % 10 == 0 {
+        if verbose && browsed_nodes.len() % 50 == 0 {
             println!("    🔍 Searched {} nodes (ns={})...", browsed_nodes.len(), node_id.namespace);
         }
         
@@ -1672,7 +1686,7 @@ fn search_methods_with_limits(
         };
         
         // Small delay to be gentle on the server
-        std::thread::sleep(std::time::Duration::from_millis(5));
+        std::thread::sleep(std::time::Duration::from_millis(2));
         
         if let Ok(Some(results)) = session.browse(&[browse_description]) {
             if let Some(result) = results.first() {
@@ -1705,7 +1719,7 @@ fn search_methods_with_limits(
                                             display_name, reference.node_id.node_id.namespace, parent_name);
                                     }
                                     
-                                    // Return immediately on exact match
+                                    // Return immediately on exact match for efficiency
                                     if exact_display_match || exact_browse_match {
                                         if verbose {
                                             println!("    🎯 Exact match found, stopping search");
@@ -1735,18 +1749,7 @@ fn search_methods_with_limits(
     Ok(found_methods)
 }
 
-fn search_methods_exhaustive(
-    session: &opcua::client::prelude::Session,
-    method_name: &str,
-    verbose: bool,
-) -> Result<Vec<(NodeId, NodeId, String)>> {
-    if verbose {
-        println!("    🚀 Starting exhaustive method search across all namespaces (this may take longer)...");
-    }
-    
-    // Use the same comprehensive search as read --search with maximum limits
-    search_methods_with_limits(session, method_name, 1000, 100, verbose)
-}
+
 
 
 
