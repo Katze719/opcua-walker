@@ -166,36 +166,68 @@ fn main() -> Result<()> {
                 return Err(anyhow::anyhow!("Private key file not found: {}", key_path));
             }
 
-            // Validate certificate file extensions
-            if let Some(cert_extension) = cert_path_buf.extension() {
-                let ext = cert_extension.to_string_lossy().to_lowercase();
-                if !["pem", "der"].contains(&ext.as_str()) {
-                    if cli.verbose {
-                        println!("  ⚠️  Warning: Certificate file extension '{}' is uncommon. Supported: .pem (text), .der (binary)", ext);
-                        println!("      Note: .crt and .cer files may work if they contain PEM or DER data");
+            // Test certificate file loading to provide better error messages
+            if cli.verbose {
+                println!("  🔍 Testing certificate file compatibility...");
+                
+                // Test certificate loading
+                if let Some(cert_extension) = cert_path_buf.extension() {
+                    let ext = cert_extension.to_string_lossy().to_lowercase();
+                    match ext.as_str() {
+                        "der" => {
+                            // Test if DER file can be read
+                            if let Ok(data) = std::fs::read(&cert_path_buf) {
+                                if data.len() > 0 && data[0] == 0x30 {
+                                    println!("  📄 Certificate: {} (DER binary format) ✅", cert_path);
+                                } else {
+                                    println!("  ⚠️  Certificate: {} - File doesn't appear to be valid DER format", cert_path);
+                                }
+                            }
+                        },
+                        "pem" => {
+                            // Test if PEM file contains certificate data
+                            if let Ok(data) = std::fs::read_to_string(&cert_path_buf) {
+                                if data.contains("-----BEGIN CERTIFICATE-----") {
+                                    println!("  📄 Certificate: {} (PEM text format) ✅", cert_path);
+                                } else {
+                                    println!("  ⚠️  Certificate: {} - File doesn't contain PEM certificate data", cert_path);
+                                }
+                            }
+                        },
+                        _ => {
+                            println!("  ⚠️  Certificate: {} - Uncommon extension '.{}', supported: .pem, .der", cert_path, ext);
+                            println!("      Note: .crt and .cer files may work if they contain valid PEM or DER data");
+                        }
                     }
+                } else {
+                    println!("  ⚠️  Certificate: {} - No file extension detected", cert_path);
                 }
-                if cli.verbose {
-                    let format_type = match ext.as_str() {
-                        "der" => "binary DER format",
-                        "pem" => "text PEM format", 
-                        _ => "unknown format"
-                    };
-                    println!("  📄 Certificate file: {} ({}, {})", cert_path, ext, format_type);
-                }
-            }
 
-            // Validate key file extensions  
-            if let Some(key_extension) = key_path_buf.extension() {
-                let ext = key_extension.to_string_lossy().to_lowercase();
-                if !["pem", "key"].contains(&ext.as_str()) {
-                    if cli.verbose {
-                        println!("  ⚠️  Warning: Private key file extension '{}' is uncommon. Supported: .pem, .key (both in PEM text format)", ext);
-                        println!("      Note: DER format private keys are not supported by the OPC-UA library");
+                // Test private key loading  
+                if let Some(key_extension) = key_path_buf.extension() {
+                    let ext = key_extension.to_string_lossy().to_lowercase();
+                    match ext.as_str() {
+                        "pem" | "key" => {
+                            // Test if PEM file contains private key data
+                            if let Ok(data) = std::fs::read_to_string(&key_path_buf) {
+                                if data.contains("-----BEGIN PRIVATE KEY-----") || data.contains("-----BEGIN RSA PRIVATE KEY-----") {
+                                    println!("  🔑 Private key: {} (PEM text format) ✅", key_path);
+                                } else {
+                                    println!("  ⚠️  Private key: {} - File doesn't contain PEM private key data", key_path);
+                                }
+                            }
+                        },
+                        "der" => {
+                            println!("  ❌ Private key: {} - DER format not supported, only PEM text format", key_path);
+                            println!("      Convert to PEM format: openssl rsa -in {} -out {}.pem", key_path, key_path);
+                        },
+                        _ => {
+                            println!("  ⚠️  Private key: {} - Uncommon extension '.{}', supported: .pem, .key", key_path, ext);
+                            println!("      Note: Only PEM text format is supported for private keys");
+                        }
                     }
-                }
-                if cli.verbose {
-                    println!("  🔑 Private key file: {} ({}, PEM text format)", key_path, ext);
+                } else {
+                    println!("  ⚠️  Private key: {} - No file extension detected", key_path);
                 }
             }
 
@@ -206,7 +238,20 @@ fn main() -> Result<()> {
                     MessageSecurityMode::None,
                 ),
                 IdentityToken::X509(cert_path_buf, key_path_buf),
-            ).map_err(|e| anyhow::anyhow!("Connection failed: {:?}", e))?
+            ).map_err(|status_code| {
+                match status_code {
+                    opcua::types::StatusCode::BadLicenseNotAvailable => {
+                        anyhow::anyhow!("Connection failed: Server licensing issue\n\n  🚨 BadLicenseNotAvailable: The OPC-UA server reports it doesn't have a proper license\n  💡 This is NOT a certificate issue - it's a server-side licensing problem\n  📋 Contact the server administrator to resolve licensing\n  🔧 Your certificate files appear to be processed correctly\n\nOriginal error: {:?}", status_code)
+                    },
+                    opcua::types::StatusCode::BadSecurityPolicyRejected => {
+                        anyhow::anyhow!("Connection failed: Certificate/Security issue\n\n  🚨 BadSecurityPolicyRejected: Server rejected the certificate or security policy\n  💡 Possible causes:\n    • Certificate format not supported by server\n    • Private key doesn't match certificate\n    • Server doesn't trust the certificate\n    • Security policy mismatch\n  🔧 Try:\n    • Verify certificate and key files are valid and matching\n    • Check server trust store configuration\n    • Use --verbose for detailed certificate validation\n\nOriginal error: {:?}", status_code)
+                    },
+                    opcua::types::StatusCode::BadCertificateInvalid => {
+                        anyhow::anyhow!("Connection failed: Invalid certificate\n\n  🚨 BadCertificateInvalid: Certificate file is invalid or corrupted\n  💡 Possible causes:\n    • Certificate file is corrupted or in wrong format\n    • DER certificate should be binary format\n    • PEM certificate should contain valid certificate data\n  🔧 Try:\n    • Verify certificate file with: openssl x509 -in cert.pem -text -noout\n    • For DER: openssl x509 -in cert.der -inform DER -text -noout\n    • Use --verbose for certificate validation details\n\nOriginal error: {:?}", status_code)
+                    },
+                    _ => anyhow::anyhow!("Connection failed: {:?}", status_code)
+                }
+            })?
         }
     };
 
