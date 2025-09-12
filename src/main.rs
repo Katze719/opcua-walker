@@ -77,10 +77,12 @@ fn main() -> Result<()> {
         );
     }
 
-    // Configure minimal client
+    // Configure minimal client but with keypair generation
     let mut client = ClientBuilder::new()
         .application_name("OPC-UA Walker")
         .application_uri("urn:opcua-walker")
+        .create_sample_keypair(true)
+        .trust_server_certs(true)
         .client()
         .ok_or_else(|| anyhow::anyhow!("Failed to create OPC-UA client"))?;
 
