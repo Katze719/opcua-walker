@@ -380,6 +380,36 @@ Tested with:
 3. **Authentication failed**: Check username/password or certificate validity
 4. **Permission denied**: Ensure proper file permissions for certificate files
 
+### Method Calling Issues
+
+**Error: BadTooManyOperations**
+- The server is overwhelmed by browse operations during method search
+- **Solution**: Use exact node IDs instead of method names:
+  ```bash
+  opcua-walker call "ns=2;s=RebootMethod" "ns=2;s=ServerObject"
+  ```
+
+**Error: BadLicenseNotAvailable**
+- The server requires a license for method execution
+- **Solution**: Contact server administrator or check licensing requirements
+
+**Error: BadUnexpectedError**
+- The method may require specific arguments or have execution restrictions
+- **Solution**: Try with explicit arguments or check method signature:
+  ```bash
+  opcua-walker call "MethodName" --args '[arg1, arg2]'
+  ```
+
+**Method not found**
+- Use `browse` to explore available methods:
+  ```bash
+  opcua-walker browse --depth 3
+  ```
+- Try with `--verbose` for detailed search information:
+  ```bash
+  opcua-walker call "MethodName" --verbose
+  ```
+
 ### Debug Mode
 
 Use the `--verbose` flag for detailed debugging information:
