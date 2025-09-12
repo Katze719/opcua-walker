@@ -77,12 +77,10 @@ fn main() -> Result<()> {
         );
     }
 
-    // Configure client
+    // Configure minimal client
     let mut client = ClientBuilder::new()
         .application_name("OPC-UA Walker")
         .application_uri("urn:opcua-walker")
-        .trust_server_certs(true)
-        .session_retry_limit(3)
         .client()
         .ok_or_else(|| anyhow::anyhow!("Failed to create OPC-UA client"))?;
 
@@ -101,7 +99,6 @@ fn main() -> Result<()> {
                     cli.endpoint.as_ref(),
                     SecurityPolicy::None.to_str(),
                     MessageSecurityMode::None,
-                    UserTokenPolicy::anonymous(),
                 ),
                 IdentityToken::Anonymous,
             ).map_err(|e| anyhow::anyhow!("Connection failed: {:?}", e))?
@@ -115,7 +112,6 @@ fn main() -> Result<()> {
                     cli.endpoint.as_ref(),
                     SecurityPolicy::None.to_str(),
                     MessageSecurityMode::None,
-                    UserTokenPolicy::anonymous(),
                 ),
                 IdentityToken::UserName(username, password),
             ).map_err(|e| anyhow::anyhow!("Connection failed: {:?}", e))?
@@ -141,7 +137,6 @@ fn main() -> Result<()> {
                     cli.endpoint.as_ref(),
                     SecurityPolicy::None.to_str(),
                     MessageSecurityMode::None,
-                    UserTokenPolicy::anonymous(),
                 ),
                 IdentityToken::X509(cert_path_buf, key_path_buf),
             ).map_err(|e| anyhow::anyhow!("Connection failed: {:?}", e))?
