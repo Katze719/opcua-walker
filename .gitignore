@@ -25,3 +25,8 @@ target
 
 target
 pki
+
+# Python virtual environment
+venv/
+*.pyc
+__pycache__/

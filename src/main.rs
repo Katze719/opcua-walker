@@ -3,7 +3,9 @@ use clap::{Parser, Subcommand};
 use colored::*;
 use opcua::client::prelude::*;
 use opcua::sync::RwLock;
+use opcua::types::{AttributeId, Identifier, QualifiedName, UAString};
 use std::sync::Arc;
+use std::str::FromStr;
 
 #[derive(Parser)]
 #[command(name = "opcua-walker")]
@@ -52,10 +54,18 @@ enum Commands {
         #[arg(short, long, default_value = "3")]
         depth: u32,
     },
-    /// Read variable values
+    /// Read node information and attributes
     Read {
-        /// Node ID of the variable to read
-        node_id: String,
+        /// Node ID(s) to read (can specify multiple)
+        node_ids: Vec<String>,
+        
+        /// Read all available attributes (default: basic info only)
+        #[arg(short, long)]
+        all_attributes: bool,
+        
+        /// Force include node value for all nodes (Variable nodes include values by default)
+        #[arg(short = 'V', long)]
+        include_value: bool,
     },
     /// Show server information
     Info,
@@ -76,37 +86,51 @@ fn main() -> Result<()> {
         );
     }
 
-    // Configure client
+    // Configure minimal client but with keypair generation
     let mut client = ClientBuilder::new()
         .application_name("OPC-UA Walker")
         .application_uri("urn:opcua-walker")
         .create_sample_keypair(true)
         .trust_server_certs(true)
-        .session_retry_limit(3)
         .client()
         .ok_or_else(|| anyhow::anyhow!("Failed to create OPC-UA client"))?;
 
+    if cli.verbose {
+        println!("Connecting to endpoint: {}", cli.endpoint);
+    }
+
     // Create session with appropriate authentication
     let session = match auth_method {
-        AuthMethod::Anonymous => client.connect_to_endpoint(
-            (
-                cli.endpoint.as_ref(),
-                SecurityPolicy::None.to_str(),
-                MessageSecurityMode::None,
-                UserTokenPolicy::anonymous(),
-            ),
-            IdentityToken::Anonymous,
-        )?,
-        AuthMethod::UsernamePassword(username, password) => client.connect_to_endpoint(
-            (
-                cli.endpoint.as_ref(),
-                SecurityPolicy::None.to_str(),
-                MessageSecurityMode::None,
-                UserTokenPolicy::anonymous(),
-            ),
-            IdentityToken::UserName(username, password),
-        )?,
+        AuthMethod::Anonymous => {
+            if cli.verbose {
+                println!("Using anonymous authentication");
+            }
+            client.connect_to_endpoint(
+                (
+                    cli.endpoint.as_ref(),
+                    SecurityPolicy::None.to_str(),
+                    MessageSecurityMode::None,
+                ),
+                IdentityToken::Anonymous,
+            ).map_err(|e| anyhow::anyhow!("Connection failed: {:?}", e))?
+        },
+        AuthMethod::UsernamePassword(username, password) => {
+            if cli.verbose {
+                println!("Using username/password authentication for user: {}", username);
+            }
+            client.connect_to_endpoint(
+                (
+                    cli.endpoint.as_ref(),
+                    SecurityPolicy::None.to_str(),
+                    MessageSecurityMode::None,
+                ),
+                IdentityToken::UserName(username, password),
+            ).map_err(|e| anyhow::anyhow!("Connection failed: {:?}", e))?
+        },
         AuthMethod::Certificate(cert_path, key_path) => {
+            if cli.verbose {
+                println!("Using X.509 certificate authentication");
+            }
             // Use paths directly for X.509 authentication
             let cert_path_buf = std::path::PathBuf::from(&cert_path);
             let key_path_buf = std::path::PathBuf::from(&key_path);
@@ -124,12 +148,15 @@ fn main() -> Result<()> {
                     cli.endpoint.as_ref(),
                     SecurityPolicy::None.to_str(),
                     MessageSecurityMode::None,
-                    UserTokenPolicy::anonymous(),
                 ),
                 IdentityToken::X509(cert_path_buf, key_path_buf),
-            )?
+            ).map_err(|e| anyhow::anyhow!("Connection failed: {:?}", e))?
         }
     };
+
+    if cli.verbose {
+        println!("Successfully connected to OPC-UA server");
+    }
 
     match &cli.command {
         Commands::Discover => {
@@ -139,8 +166,8 @@ fn main() -> Result<()> {
             let start_node = node.as_deref().unwrap_or("ns=0;i=85"); // Objects folder
             browse_address_space(session.clone(), start_node, *depth, cli.verbose)?;
         }
-        Commands::Read { node_id } => {
-            read_variable_value(session.clone(), node_id, cli.verbose)?;
+        Commands::Read { node_ids, all_attributes, include_value } => {
+            read_node_information(session.clone(), node_ids, *all_attributes, *include_value, cli.verbose)?;
         }
         Commands::Info => {
             show_server_info(session.clone(), cli.verbose)?;
@@ -342,108 +369,434 @@ fn browse_address_space(
 fn browse_simple(
     session: &opcua::client::prelude::Session,
     start_node: &str,
-    _max_depth: u32,
+    max_depth: u32,
     verbose: bool,
 ) -> Result<usize> {
-    // Simple browse implementation that shows basic structure
     println!("\n{}", "🌳 Address Space Structure".bright_blue().bold());
 
-    // Try to browse some standard well-known nodes
-    let standard_nodes = vec![
-        ("Objects", "ns=0;i=85"),
-        ("Server", "ns=0;i=2253"),
-        ("Types", "ns=0;i=86"),
-        ("Views", "ns=0;i=87"),
-    ];
-
+    // Parse the starting node ID
+    let start_node_id = parse_node_id(start_node)?;
+    
     let mut found_count = 0;
-
-    for (name, node_id) in &standard_nodes {
-        if read_node_info(session, node_id, name, verbose).is_ok() {
-            found_count += 1;
+    let mut nodes_to_browse = vec![(start_node_id.clone(), 0)]; // (node_id, depth)
+    let mut browsed_nodes = std::collections::HashSet::new();
+    
+    while let Some((node_id, depth)) = nodes_to_browse.pop() {
+        if depth > max_depth {
+            continue;
         }
-    }
+        
+        // Avoid infinite loops by tracking browsed nodes
+        let node_key = format!("{:?}", node_id);
+        if browsed_nodes.contains(&node_key) {
+            continue;
+        }
+        browsed_nodes.insert(node_key);
 
-    // Try to read the start node if it's different
-    if !standard_nodes.iter().any(|(_, id)| *id == start_node) {
-        if read_node_info(session, start_node, "Start Node", verbose).is_ok() {
-            found_count += 1;
+        if verbose {
+            println!("📍 Browsing node: {:?} at depth {}", node_id, depth);
+        }
+
+        // Create browse request
+        let browse_description = BrowseDescription {
+            node_id: node_id.clone(),
+            browse_direction: BrowseDirection::Forward,
+            reference_type_id: ReferenceTypeId::HierarchicalReferences.into(),
+            include_subtypes: true,
+            node_class_mask: 0, // All node classes
+            result_mask: 0x3F, // All result mask bits
+        };
+
+        match session.browse(&[browse_description]) {
+            Ok(Some(results)) => {
+                if let Some(result) = results.first() {
+                    if result.status_code.is_good() {
+                        if let Some(ref references) = result.references {
+                            let indent = "  ".repeat(depth as usize);
+                            
+                            if depth == 0 {
+                                // Show the starting node itself
+                                println!("{}📁 {} ({})", 
+                                    indent, 
+                                    "Starting Node".bright_white(), 
+                                    start_node.dimmed()
+                                );
+                                found_count += 1;
+                            }
+                            
+                            for reference in references {
+                                let node_class_icon = match reference.node_class {
+                                    NodeClass::Object => "📁",
+                                    NodeClass::Variable => "📊",
+                                    NodeClass::Method => "⚡",
+                                    NodeClass::ObjectType => "🏷️",
+                                    NodeClass::VariableType => "🔖",
+                                    NodeClass::ReferenceType => "🔗",
+                                    NodeClass::DataType => "📝",
+                                    NodeClass::View => "👁️",
+                                    _ => "❓",
+                                };
+                                
+                                let display_name = reference.display_name.text.as_ref();
+                                
+                                let node_id_str = format!("{}", reference.node_id.node_id);
+                                
+                                println!("{}  {} {} ({})", 
+                                    indent,
+                                    node_class_icon,
+                                    display_name.bright_white(),
+                                    node_id_str.dimmed()
+                                );
+                                
+                                found_count += 1;
+                                
+                                // Add child nodes to browse queue if we haven't reached max depth
+                                if depth < max_depth {
+                                    nodes_to_browse.push((reference.node_id.node_id.clone(), depth + 1));
+                                }
+                                
+                                // If it's a variable, try to read its value
+                                if reference.node_class == NodeClass::Variable && verbose {
+                                    if let Ok(value) = read_variable_value_sync(session, &node_id_str) {
+                                        println!("{}     💠 Value: {}", 
+                                            indent, 
+                                            value.bright_cyan()
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        if verbose {
+                            println!("❌ Browse failed for {:?}: {:?}", node_id, result.status_code);
+                        }
+                    }
+                }
+            }
+            Ok(None) => {
+                if verbose {
+                    println!("❌ Browse returned no results for {:?}", node_id);
+                }
+            }
+            Err(e) => {
+                if verbose {
+                    println!("❌ Browse error for {:?}: {}", node_id, e);
+                }
+            }
         }
     }
 
     Ok(found_count)
 }
 
-fn read_node_info(
-    session: &opcua::client::prelude::Session,
-    node_id: &str,
-    name: &str,
-    verbose: bool,
-) -> Result<()> {
-    // Parse the node ID manually - simple implementation
-    let node = if node_id.starts_with("ns=0;i=") {
-        let id_str = &node_id[7..]; // Skip "ns=0;i="
-        if let Ok(id) = id_str.parse::<u32>() {
-            NodeId::new(0, id)
-        } else {
-            return Err(anyhow::anyhow!("Invalid node ID format: {}", node_id));
-        }
-    } else {
-        return Err(anyhow::anyhow!("Unsupported node ID format: {}", node_id));
-    };
-
+fn read_variable_value_sync(session: &opcua::client::prelude::Session, node_id: &str) -> Result<String> {
+    let node = parse_node_id(node_id)?;
     let read_request = vec![ReadValueId::from(&node)];
-
+    
     match session.read(&read_request, TimestampsToReturn::Neither, 0.0) {
         Ok(results) => {
             if let Some(result) = results.first() {
                 if let Some(status) = &result.status {
                     if status.is_good() {
-                        println!("  📋 {} ({})", name.bright_white(), node_id.dimmed());
-                        if verbose {
-                            if let Some(value) = &result.value {
-                                println!("     Value: {:?}", value);
-                            }
+                        if let Some(value) = &result.value {
+                            return Ok(format_value(value));
+                        } else {
+                            return Ok("null".to_string());
                         }
-                        return Ok(());
+                    } else {
+                        // Provide more specific error information
+                        return Ok(format!("Error({})", status));
+                    }
+                } else {
+                    // According to OPC-UA spec, None status typically means Good
+                    if let Some(value) = &result.value {
+                        return Ok(format_value(value));
+                    } else {
+                        return Ok("null".to_string());
                     }
                 }
             }
-            Err(anyhow::anyhow!("Failed to read node {}", node_id))
+            Ok("No result".to_string())
         }
-        Err(e) => Err(anyhow::anyhow!("Error reading {}: {}", node_id, e)),
+        Err(e) => {
+            // Provide more informative error message instead of just "N/A"
+            Ok(format!("ReadError: {}", e))
+        }
     }
 }
 
-fn read_variable_value(session: Arc<RwLock<Session>>, node_id: &str, verbose: bool) -> Result<()> {
-    println!("\n{}", "📖 Reading Variable".bright_green().bold());
-    println!("Node ID: {}", node_id.bright_yellow());
+
+fn read_node_information(
+    session: Arc<RwLock<Session>>, 
+    node_ids: &[String], 
+    all_attributes: bool,
+    include_value: bool,
+    verbose: bool
+) -> Result<()> {
+    println!("\n{}", "📖 Reading Node Information".bright_green().bold());
+    
+    if node_ids.is_empty() {
+        return Err(anyhow::anyhow!("No node IDs provided"));
+    }
+    
+    println!("Reading {} node(s):", node_ids.len());
+    for node_id in node_ids {
+        println!("  • {}", node_id.bright_yellow());
+    }
+    
+    if all_attributes {
+        println!("Mode: {}", "All Attributes".bright_cyan());
+    } else {
+        println!("Mode: {}", "Basic Information".bright_cyan());
+    }
 
     let session_lock = session.read();
 
-    // Parse node ID - support basic formats
+    for (i, node_id) in node_ids.iter().enumerate() {
+        if i > 0 {
+            println!("\n{}", "─".repeat(60).dimmed());
+        }
+        
+        println!("\n{}", format!("📋 Node {} of {}", i + 1, node_ids.len()).bright_blue().bold());
+        
+        match read_single_node_info(&session_lock, node_id, all_attributes, include_value, verbose) {
+            Ok(_) => {
+                println!("  {}", "✅ Successfully read node information".bright_green());
+            }
+            Err(e) => {
+                println!("  {}Error reading node {}: {}", "❌ ".red(), node_id, e);
+                if verbose {
+                    println!("     Details: {:?}", e);
+                }
+            }
+        }
+    }
+
+    println!(
+        "\n{}",
+        "✅ Node reading completed".bright_green()
+    );
+
+    Ok(())
+}
+
+fn read_single_node_info(
+    session: &opcua::client::prelude::Session,
+    node_id: &str,
+    all_attributes: bool,
+    include_value: bool,
+    verbose: bool,
+) -> Result<()> {
+    // Parse node ID
     let node = parse_node_id(node_id)?;
+    
+    println!("  Node ID: {}", node_id.bright_cyan());
 
-    let read_request = vec![ReadValueId::from(&node)];
-
-    match session_lock.read(&read_request, TimestampsToReturn::Both, 0.0) {
+    // First, read the node class to determine if it's a variable
+    let node_class_read = vec![ReadValueId {
+        node_id: node.clone(),
+        attribute_id: AttributeId::NodeClass as u32,
+        index_range: UAString::null(),
+        data_encoding: QualifiedName::null(),
+    }];
+    
+    let mut is_variable = false;
+    match session.read(&node_class_read, TimestampsToReturn::Neither, 0.0) {
         Ok(results) => {
             if let Some(result) = results.first() {
-                println!("\n{}", "📋 Variable Information".bright_blue().bold());
-                println!("  Node ID: {}", node_id.bright_cyan());
-
                 if let Some(status) = &result.status {
                     if status.is_good() {
-                        println!("  Status: {}", "Good".bright_green());
-
                         if let Some(value) = &result.value {
-                            println!("  Value: {}", format_value(value).bright_white());
-                            println!("  Type: {}", get_variant_type_name(value).bright_yellow());
-
-                            if verbose {
-                                println!("  Raw Value: {:?}", value);
+                            if let Variant::Int32(class_id) = value {
+                                is_variable = *class_id == 2; // NodeClass::Variable = 2
                             }
+                        }
+                    }
+                }
+            }
+        }
+        Err(_) => {
+            // Can't determine node class, proceed without assuming it's a variable
+        }
+    }
 
+    // Define which attributes to read based on mode
+    let mut attributes_to_read = Vec::new();
+    
+    // Basic attributes (always read)
+    attributes_to_read.push((AttributeId::DisplayName, "Display Name"));
+    attributes_to_read.push((AttributeId::NodeClass, "Node Class"));
+    attributes_to_read.push((AttributeId::BrowseName, "Browse Name"));
+    
+    if all_attributes || verbose {
+        // Additional attributes for comprehensive reading
+        attributes_to_read.push((AttributeId::Description, "Description"));
+        attributes_to_read.push((AttributeId::WriteMask, "Write Mask"));
+        attributes_to_read.push((AttributeId::UserWriteMask, "User Write Mask"));
+        
+        // Variable-specific attributes (will fail gracefully for non-variables)
+        attributes_to_read.push((AttributeId::DataType, "Data Type"));
+        attributes_to_read.push((AttributeId::ValueRank, "Value Rank"));
+        attributes_to_read.push((AttributeId::ArrayDimensions, "Array Dimensions"));
+        attributes_to_read.push((AttributeId::AccessLevel, "Access Level"));
+        attributes_to_read.push((AttributeId::UserAccessLevel, "User Access Level"));
+        attributes_to_read.push((AttributeId::MinimumSamplingInterval, "Min Sampling Interval"));
+        attributes_to_read.push((AttributeId::Historizing, "Historizing"));
+    }
+    
+    // Add Value attribute if explicitly requested, or if it's a variable (auto-include for variables)
+    if include_value || is_variable {
+        attributes_to_read.push((AttributeId::Value, "Value"));
+        if is_variable && !include_value {
+            println!("  {} Automatically including value for Variable node", "💡".bright_blue());
+        }
+    } else if !is_variable && !include_value {
+        // Show a helpful message for non-variables when value is not included
+        println!("  {} Use --include-value to try reading value attribute for non-Variable nodes", "💡".bright_blue());
+    }
+
+    // Build read requests
+    let read_requests: Vec<ReadValueId> = attributes_to_read
+        .iter()
+        .map(|(attr_id, _)| ReadValueId {
+            node_id: node.clone(),
+            attribute_id: *attr_id as u32,
+            index_range: UAString::null(),
+            data_encoding: QualifiedName::null(),
+        })
+        .collect();
+
+    // Execute read
+    match session.read(&read_requests, TimestampsToReturn::Both, 0.0) {
+        Ok(results) => {
+            let mut node_class: Option<NodeClass> = None;
+            
+            // Process results
+            for ((_attr_id, attr_name), result) in attributes_to_read.iter().zip(results.iter()) {
+                if let Some(status) = &result.status {
+                    if status.is_good() {
+                        if let Some(value) = &result.value {
+                            match attr_name {
+                                &"Display Name" => {
+                                    if let Variant::LocalizedText(text) = value {
+                                        println!("  Display Name: {}", text.text.to_string().bright_white());
+                                    }
+                                }
+                                &"Node Class" => {
+                                    if let Variant::Int32(class_id) = value {
+                                        // Convert numeric ID to NodeClass
+                                        let class = match *class_id {
+                                            1 => NodeClass::Object,
+                                            2 => NodeClass::Variable,
+                                            4 => NodeClass::Method,
+                                            8 => NodeClass::ObjectType,
+                                            16 => NodeClass::VariableType,
+                                            32 => NodeClass::ReferenceType,
+                                            64 => NodeClass::DataType,
+                                            128 => NodeClass::View,
+                                            _ => NodeClass::Unspecified,
+                                        };
+                                        node_class = Some(class);
+                                        let (icon, name) = get_node_class_info(class);
+                                        println!("  Node Class: {} {} ({})", icon, name.bright_white(), class_id);
+                                    }
+                                }
+                                &"Browse Name" => {
+                                    if let Variant::QualifiedName(qname) = value {
+                                        println!("  Browse Name: {} (ns={})", 
+                                            qname.name.to_string().bright_white(), 
+                                            qname.namespace_index
+                                        );
+                                    }
+                                }
+                                &"Description" => {
+                                    if let Variant::LocalizedText(text) = value {
+                                        if !text.text.is_empty() {
+                                            println!("  Description: {}", text.text.to_string().bright_white());
+                                        }
+                                    }
+                                }
+                                &"Data Type" => {
+                                    if let Variant::NodeId(data_type_id) = value {
+                                        let type_name = get_data_type_name(data_type_id);
+                                        println!("  Data Type: {} ({})", type_name.bright_yellow(), data_type_id);
+                                    }
+                                }
+                                &"Value" => {
+                                    println!("  Value: {}", format_value(value).bright_white());
+                                    println!("  Value Type: {}", get_variant_type_name(value).bright_yellow());
+                                    
+                                    // Show timestamps if available
+                                    if let Some(source_ts) = &result.source_timestamp {
+                                        println!(
+                                            "  Source Timestamp: {}",
+                                            source_ts
+                                                .as_chrono()
+                                                .format("%Y-%m-%d %H:%M:%S UTC")
+                                                .to_string()
+                                                .dimmed()
+                                        );
+                                    }
+                                    if let Some(server_ts) = &result.server_timestamp {
+                                        println!(
+                                            "  Server Timestamp: {}",
+                                            server_ts
+                                                .as_chrono()
+                                                .format("%Y-%m-%d %H:%M:%S UTC")
+                                                .to_string()
+                                                .dimmed()
+                                        );
+                                    }
+                                }
+                                &"Access Level" => {
+                                    if let Variant::Byte(access) = value {
+                                        println!("  Access Level: {} ({})", 
+                                            format_access_level(*access).bright_white(), 
+                                            access
+                                        );
+                                    }
+                                }
+                                &"User Access Level" => {
+                                    if let Variant::Byte(access) = value {
+                                        println!("  User Access Level: {} ({})", 
+                                            format_access_level(*access).bright_white(), 
+                                            access
+                                        );
+                                    }
+                                }
+                                &"Value Rank" => {
+                                    if let Variant::Int32(rank) = value {
+                                        println!("  Value Rank: {} ({})", 
+                                            format_value_rank(*rank).bright_white(), 
+                                            rank
+                                        );
+                                    }
+                                }
+                                &"Historizing" => {
+                                    if let Variant::Boolean(hist) = value {
+                                        println!("  Historizing: {}", 
+                                            if *hist { "Yes".bright_green() } else { "No".dimmed() }
+                                        );
+                                    }
+                                }
+                                _ => {
+                                    if verbose {
+                                        println!("  {}: {}", attr_name.bright_blue(), format_value(value));
+                                    }
+                                }
+                            }
+                        }
+                    } else if verbose {
+                        println!("  {} (read failed): {:?}", attr_name.dimmed(), status);
+                    }
+                } else {
+                    // Handle None status according to OPC-UA spec (treat as Good)
+                    if let Some(value) = &result.value {
+                        // Just handle the Value attribute for now since that's what the user cares about
+                        if *attr_name == "Value" {
+                            println!("  Value: {}", format_value(value).bright_white());
+                            println!("  Value Type: {}", get_variant_type_name(value).bright_yellow());
+                            
                             // Show timestamps if available
                             if let Some(source_ts) = &result.source_timestamp {
                                 println!(
@@ -465,32 +818,141 @@ fn read_variable_value(session: Arc<RwLock<Session>>, node_id: &str, verbose: bo
                                         .dimmed()
                                 );
                             }
-                        } else {
-                            println!("  Value: {}", "No value returned".yellow());
+                        } else if verbose {
+                            // For other attributes, use the existing format_value function
+                            println!("  {}: {}", attr_name.bright_blue(), format_value(value));
                         }
                     } else {
-                        println!("  Status: {} ({:?})", "Error".bright_red(), status);
-                        return Err(anyhow::anyhow!("Read failed with status: {:?}", status));
+                        // Value is None - show appropriate message
+                        if *attr_name == "Value" {
+                            println!("  Value: {}", "null".dimmed());
+                        } else if verbose {
+                            println!("  {}: {}", attr_name.dimmed(), "null".dimmed());
+                        }
                     }
                 }
-
-                println!(
-                    "\n{}",
-                    "✅ Variable read completed successfully".bright_green()
-                );
+            }
+            
+            // Show additional information based on node class
+            if let Some(class) = node_class {
+                show_node_class_specific_info(session, &node, class, verbose)?;
             }
         }
         Err(e) => {
-            println!("{}Error reading variable: {}", "❌ ".red(), e);
-            return Err(anyhow::anyhow!("Failed to read variable: {}", e));
+            return Err(anyhow::anyhow!("Failed to read node attributes: {}", e));
         }
     }
 
     Ok(())
 }
 
+fn get_node_class_info(node_class: NodeClass) -> (&'static str, &'static str) {
+    match node_class {
+        NodeClass::Object => ("📁", "Object"),
+        NodeClass::Variable => ("📊", "Variable"),
+        NodeClass::Method => ("⚡", "Method"),
+        NodeClass::ObjectType => ("🏷️", "ObjectType"),
+        NodeClass::VariableType => ("🔖", "VariableType"),
+        NodeClass::ReferenceType => ("🔗", "ReferenceType"),
+        NodeClass::DataType => ("📝", "DataType"),
+        NodeClass::View => ("👁️", "View"),
+        _ => ("❓", "Unknown"),
+    }
+}
+
+fn get_data_type_name(node_id: &NodeId) -> String {
+    // Map common OPC-UA data type node IDs to names
+    match (node_id.namespace, &node_id.identifier) {
+        (0, Identifier::Numeric(id)) => match *id {
+            1 => "Boolean".to_string(),
+            2 => "SByte".to_string(),
+            3 => "Byte".to_string(),
+            4 => "Int16".to_string(),
+            5 => "UInt16".to_string(),
+            6 => "Int32".to_string(),
+            7 => "UInt32".to_string(),
+            8 => "Int64".to_string(),
+            9 => "UInt64".to_string(),
+            10 => "Float".to_string(),
+            11 => "Double".to_string(),
+            12 => "String".to_string(),
+            13 => "DateTime".to_string(),
+            14 => "Guid".to_string(),
+            15 => "ByteString".to_string(),
+            16 => "XmlElement".to_string(),
+            17 => "NodeId".to_string(),
+            18 => "ExpandedNodeId".to_string(),
+            19 => "StatusCode".to_string(),
+            20 => "QualifiedName".to_string(),
+            21 => "LocalizedText".to_string(),
+            22 => "Structure".to_string(),
+            23 => "DataValue".to_string(),
+            24 => "BaseDataType".to_string(),
+            25 => "DiagnosticInfo".to_string(),
+            _ => format!("DataType({})", id),
+        },
+        _ => format!("{}", node_id),
+    }
+}
+
+fn format_access_level(access: u8) -> String {
+    let mut parts = Vec::new();
+    if access & 0x01 != 0 { parts.push("Read"); }
+    if access & 0x02 != 0 { parts.push("Write"); }
+    if access & 0x04 != 0 { parts.push("HistoryRead"); }
+    if access & 0x08 != 0 { parts.push("HistoryWrite"); }
+    if access & 0x10 != 0 { parts.push("SemanticChange"); }
+    if access & 0x20 != 0 { parts.push("StatusWrite"); }
+    if access & 0x40 != 0 { parts.push("TimestampWrite"); }
+    
+    if parts.is_empty() {
+        "None".to_string()
+    } else {
+        parts.join(" | ")
+    }
+}
+
+fn format_value_rank(rank: i32) -> String {
+    match rank {
+        -3 => "ScalarOrOneDimension".to_string(),
+        -2 => "Any".to_string(),
+        -1 => "Scalar".to_string(),
+        0 => "OneOrMoreDimensions".to_string(),
+        1 => "OneDimension".to_string(),
+        n if n > 1 => format!("{}Dimensions", n),
+        _ => format!("Unknown({})", rank),
+    }
+}
+
+fn show_node_class_specific_info(
+    _session: &opcua::client::prelude::Session,
+    _node_id: &NodeId,
+    node_class: NodeClass,
+    verbose: bool,
+) -> Result<()> {
+    match node_class {
+        NodeClass::Object | NodeClass::ObjectType => {
+            // For objects, we could show their children or type definition
+            if verbose {
+                println!("  {} This is an object node - use 'browse' to see its children", "💡".bright_blue());
+            }
+        }
+        NodeClass::Method => {
+            // For methods, we could show input/output arguments
+            if verbose {
+                println!("  {} This is a method node - can be called with appropriate arguments", "💡".bright_blue());
+            }
+        }
+        NodeClass::Variable => {
+            // Additional variable-specific information already shown above
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 fn parse_node_id(node_id: &str) -> Result<NodeId> {
-    // Simple node ID parser for common formats
+    // Handle different node ID formats
     if node_id.starts_with("ns=") {
         if let Some(semicolon_pos) = node_id.find(';') {
             let ns_part = &node_id[3..semicolon_pos];
@@ -510,6 +972,20 @@ fn parse_node_id(node_id: &str) -> Result<NodeId> {
                 // String identifier
                 let id = id_part[2..].to_string();
                 Ok(NodeId::new(namespace, id))
+            } else if id_part.starts_with("g=") {
+                // GUID identifier
+                let guid_str = &id_part[2..];
+                let guid = opcua::types::Guid::from_str(guid_str)
+                    .map_err(|_| anyhow::anyhow!("Invalid GUID: {}", node_id))?;
+                Ok(NodeId::new(namespace, guid))
+            } else if id_part.starts_with("b=") {
+                // ByteString identifier (base64 encoded)
+                let bytes_str = &id_part[2..];
+                use base64::Engine;
+                match base64::engine::general_purpose::STANDARD.decode(bytes_str) {
+                    Ok(bytes) => Ok(NodeId::new(namespace, opcua::types::ByteString::from(bytes))),
+                    Err(_) => Err(anyhow::anyhow!("Invalid base64 ByteString: {}", node_id))
+                }
             } else {
                 Err(anyhow::anyhow!(
                     "Unsupported node ID identifier type: {}",
@@ -519,8 +995,23 @@ fn parse_node_id(node_id: &str) -> Result<NodeId> {
         } else {
             Err(anyhow::anyhow!("Invalid node ID format: {}", node_id))
         }
+    } else if node_id.starts_with("i=") {
+        // Simple numeric format without namespace (assumes ns=0)
+        let id = node_id[2..]
+            .parse::<u32>()
+            .map_err(|_| anyhow::anyhow!("Invalid numeric ID: {}", node_id))?;
+        Ok(NodeId::new(0, id))
+    } else if node_id.starts_with("s=") {
+        // Simple string format without namespace (assumes ns=0)
+        let id = node_id[2..].to_string();
+        Ok(NodeId::new(0, id))
     } else {
-        Err(anyhow::anyhow!("Unsupported node ID format: {}", node_id))
+        // Try to parse as a simple numeric value
+        if let Ok(id) = node_id.parse::<u32>() {
+            Ok(NodeId::new(0, id))
+        } else {
+            Err(anyhow::anyhow!("Unsupported node ID format: {}", node_id))
+        }
     }
 }
 
