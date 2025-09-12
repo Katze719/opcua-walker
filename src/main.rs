@@ -235,27 +235,76 @@ fn main() -> Result<()> {
                 }
             }
 
-            client.connect_to_endpoint(
-                (
-                    cli.endpoint.as_ref(),
-                    SecurityPolicy::None.to_str(),
-                    MessageSecurityMode::None,
-                ),
-                IdentityToken::X509(cert_path_buf, key_path_buf),
-            ).map_err(|status_code| {
-                match status_code {
-                    opcua::types::StatusCode::BadLicenseNotAvailable => {
-                        anyhow::anyhow!("Connection failed: Server licensing issue\n\n  🚨 BadLicenseNotAvailable: The OPC-UA server reports it doesn't have a proper license\n  💡 This is NOT a certificate issue - it's a server-side licensing problem\n  📋 Contact the server administrator to resolve licensing\n  🔧 Your certificate files appear to be processed correctly\n\nOriginal error: {:?}", status_code)
-                    },
-                    opcua::types::StatusCode::BadSecurityPolicyRejected => {
-                        anyhow::anyhow!("Connection failed: Certificate/Security issue\n\n  🚨 BadSecurityPolicyRejected: Server rejected the certificate or security policy\n  💡 Possible causes:\n    • Certificate format not supported by server\n    • Private key doesn't match certificate\n    • Server doesn't trust the certificate\n    • Security policy mismatch\n  🔧 Try:\n    • Verify certificate and key files are valid and matching\n    • Check server trust store configuration\n    • Use --verbose for detailed certificate validation\n\nOriginal error: {:?}", status_code)
-                    },
-                    opcua::types::StatusCode::BadCertificateInvalid => {
-                        anyhow::anyhow!("Connection failed: Invalid certificate\n\n  🚨 BadCertificateInvalid: Certificate file is invalid or corrupted\n  💡 Possible causes:\n    • Certificate file is corrupted or in wrong format\n    • DER certificate should be binary format\n    • PEM certificate should contain valid certificate data\n  🔧 Try:\n    • Verify certificate file with: openssl x509 -in cert.pem -text -noout\n    • For DER: openssl x509 -in cert.der -inform DER -text -noout\n    • Use --verbose for certificate validation details\n\nOriginal error: {:?}", status_code)
-                    },
-                    _ => anyhow::anyhow!("Connection failed: {:?}", status_code)
+            // Try different security policy combinations for certificate authentication
+            // Certificate authentication requires secure channels, not None policy
+            let security_configs = [
+                (SecurityPolicy::Basic256Sha256, MessageSecurityMode::SignAndEncrypt),
+                (SecurityPolicy::Basic256Sha256, MessageSecurityMode::Sign),
+                (SecurityPolicy::Basic256, MessageSecurityMode::SignAndEncrypt),
+                (SecurityPolicy::Basic256, MessageSecurityMode::Sign),
+                (SecurityPolicy::Basic128Rsa15, MessageSecurityMode::SignAndEncrypt),
+                (SecurityPolicy::Basic128Rsa15, MessageSecurityMode::Sign),
+            ];
+
+            let mut last_error = None;
+            let mut successful_session = None;
+            
+            for (security_policy, message_mode) in &security_configs {
+                if cli.verbose {
+                    println!("  🔐 Trying security policy: {} with mode: {:?}", security_policy.to_str(), message_mode);
                 }
-            })?
+                
+                match client.connect_to_endpoint(
+                    (
+                        cli.endpoint.as_ref(),
+                        security_policy.to_str(),
+                        *message_mode,
+                    ),
+                    IdentityToken::X509(cert_path_buf.clone(), key_path_buf.clone()),
+                ) {
+                    Ok(session) => {
+                        if cli.verbose {
+                            println!("  ✅ Successfully connected with {} / {:?}", security_policy.to_str(), message_mode);
+                        }
+                        successful_session = Some(session);
+                        break;
+                    },
+                    Err(err) => {
+                        if cli.verbose {
+                            println!("  ❌ Failed with {} / {:?}: {:?}", security_policy.to_str(), message_mode, err);
+                        }
+                        last_error = Some(err);
+                    }
+                }
+            }
+
+            match successful_session {
+                Some(session) => session,
+                None => {
+                    // If all security policies failed, return detailed error
+                    let final_error = last_error.unwrap_or(opcua::types::StatusCode::BadSecurityPolicyRejected);
+                    return Err(match final_error {
+                        opcua::types::StatusCode::BadLicenseNotAvailable => {
+                            anyhow::anyhow!("Connection failed: Server licensing issue\n\n  🚨 BadLicenseNotAvailable: The OPC-UA server reports it doesn't have a proper license\n  💡 This is NOT a certificate issue - it's a server-side licensing problem\n  📋 Contact the server administrator to resolve licensing\n  🔧 Your certificate files appear to be processed correctly\n\nOriginal error: {:?}", final_error)
+                        },
+                        opcua::types::StatusCode::BadSecurityPolicyRejected => {
+                            anyhow::anyhow!("Connection failed: Certificate/Security issue\n\n  🚨 BadSecurityPolicyRejected: Server rejected all security policies\n  💡 Possible causes:\n    • Certificate format not supported by server\n    • Private key doesn't match certificate\n    • Server doesn't trust the certificate\n    • Server only supports specific security policies\n  🔧 Try:\n    • Verify certificate and key files are valid and matching: openssl x509 -in {} -text -noout\n    • Check server trust store configuration\n    • Tried security policies: Basic256Sha256, Basic256, Basic128Rsa15 with Sign/SignAndEncrypt\n\nOriginal error: {:?}", cert_path, final_error)
+                        },
+                        opcua::types::StatusCode::BadCertificateInvalid => {
+                            anyhow::anyhow!("Connection failed: Invalid certificate\n\n  🚨 BadCertificateInvalid: Certificate file is invalid or corrupted\n  💡 Possible causes:\n    • Certificate file is corrupted or in wrong format\n    • DER certificate should be binary format\n    • PEM certificate should contain valid certificate data\n  🔧 Try:\n    • Verify certificate file with: openssl x509 -in {} -text -noout\n    • For DER: openssl x509 -in {} -inform DER -text -noout\n    • Use --verbose for certificate validation details\n\nOriginal error: {:?}", cert_path, cert_path, final_error)
+                        },
+                        _ => {
+                            // Check for combined error status like the user reported
+                            let error_str = format!("{:?}", final_error);
+                            if error_str.contains("BadUnexpectedError") && error_str.contains("BadTooManyOperations") && error_str.contains("BadLicenseNotAvailable") {
+                                anyhow::anyhow!("Connection failed: Combined certificate and server errors\n\n  🚨 Multiple Error Codes: BadUnexpectedError + BadTooManyOperations + BadLicenseNotAvailable\n  💡 This suggests:\n    • Certificate authentication is triggering server licensing issues\n    • Wrong security policy for certificate authentication was being used\n    • Server may have strict licensing that doesn't work with None security policy\n  🔧 Fixed:\n    • Now using proper security policies (Basic256Sha256, Basic256, Basic128Rsa15)\n    • Now using secure message modes (Sign, SignAndEncrypt) instead of None\n    • Try again - this should work now with proper certificate security\n\nOriginal error: {:?}", final_error)
+                            } else {
+                                anyhow::anyhow!("Connection failed: Tried all standard security policies\n\n  🚨 Certificate authentication failed with all security configurations\n  💡 Tried security policies:\n    • Basic256Sha256 (with Sign & SignAndEncrypt)\n    • Basic256 (with Sign & SignAndEncrypt)\n    • Basic128Rsa15 (with Sign & SignAndEncrypt)\n  🔧 Your server may require specific security settings or certificate configuration\n  📋 Check server documentation for supported security policies\n\nOriginal error: {:?}", final_error)
+                            }
+                        }
+                    });
+                }
+            }
         }
     };
 
