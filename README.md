@@ -143,14 +143,20 @@ opcua-walker read --search "Temperature" --all-attributes
 
 #### Call Methods
 ```bash
-# Call a method without arguments
+# Call a method by name (auto-search for method and object)
+opcua-walker call "Reboot"
+
+# Call a method with exact node IDs
 opcua-walker call "ns=2;s=ResetCounter" "ns=2;s=CounterObject"
 
-# Call a method with arguments
-opcua-walker call "ns=2;s=AddNumbers" "ns=2;s=MathObject" --args "5,10"
+# Call a method with arguments (auto-search)
+opcua-walker call "AddNumbers" --args "5,10"
 
-# Call with JSON arguments
+# Call with JSON arguments (exact IDs)
 opcua-walker call "ns=2;s=ProcessData" "ns=2;s=DataObject" --args '[42, "test"]'
+
+# Verbose output to see search details
+opcua-walker call "Reboot" --verbose
 ```
 
 #### Authentication Examples
