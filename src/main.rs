@@ -1514,27 +1514,65 @@ fn search_nodes_by_name(
     search_term: &str,
     verbose: bool,
 ) -> Result<Vec<(NodeId, String, NodeClass)>> {
+    // Use progressive search strategy for better performance
+    // Start with fast shallow search, then go deeper only if needed
+    
+    if verbose {
+        println!("    🎯 Starting progressive search for: '{}'", search_term);
+    }
+    
+    // Stage 1: Quick search (depth-limited like browse)
+    let quick_results = search_nodes_with_depth_limit(session, search_term, 3, verbose)?;
+    if !quick_results.is_empty() {
+        if verbose {
+            println!("    ✅ Quick search found {} matches", quick_results.len());
+        }
+        return Ok(quick_results);
+    }
+    
+    // Stage 2: Broader search if no exact matches found
+    if verbose {
+        println!("    🔄 No quick matches, trying broader search...");
+    }
+    let broader_results = search_nodes_with_depth_limit(session, search_term, 5, verbose)?;
+    if !broader_results.is_empty() {
+        if verbose {
+            println!("    ✅ Broader search found {} matches", broader_results.len());
+        }
+        return Ok(broader_results);
+    }
+    
+    // Stage 3: Deep search as last resort
+    if verbose {
+        println!("    🔍 No matches yet, trying deep search...");
+    }
+    search_nodes_deep(session, search_term, verbose)
+}
+
+fn search_nodes_with_depth_limit(
+    session: &opcua::client::prelude::Session,
+    search_term: &str,
+    max_depth: u32,
+    verbose: bool,
+) -> Result<Vec<(NodeId, String, NodeClass)>> {
     let mut found_nodes = Vec::new();
     let mut nodes_to_browse = vec![
-        NodeId::new(0, 85),   // Objects folder
-        NodeId::new(0, 2253), // Server node
-        NodeId::new(0, 86),   // Types folder
+        (NodeId::new(0, 85), 0),   // Objects folder
+        (NodeId::new(0, 2253), 0), // Server node  
+        (NodeId::new(0, 86), 0),   // Types folder
     ];
     let mut browsed_nodes = HashSet::new();
-    let max_nodes = 2000; // Increased limit for comprehensive search
-    let max_queue = 500;  // Increased queue limit to allow deeper exploration
     
-    while let Some(node_id) = nodes_to_browse.pop() {
-        // Avoid infinite loops and respect limits
+    while let Some((node_id, depth)) = nodes_to_browse.pop() {
+        if depth > max_depth {
+            continue;
+        }
+        
         let node_key = format!("{:?}", node_id);
-        if browsed_nodes.contains(&node_key) || browsed_nodes.len() >= max_nodes {
+        if browsed_nodes.contains(&node_key) {
             continue;
         }
         browsed_nodes.insert(node_key);
-        
-        if verbose && browsed_nodes.len() % 50 == 0 {
-            println!("    🔍 Searched {} nodes (ns={})...", browsed_nodes.len(), node_id.namespace);
-        }
         
         // Create browse request
         let browse_description = BrowseDescription {
@@ -1546,9 +1584,7 @@ fn search_nodes_by_name(
             result_mask: 0x3F, // All result mask bits
         };
         
-        // Small delay to be gentle on the server
-        std::thread::sleep(std::time::Duration::from_millis(2));
-        
+        // No artificial delays - let the server respond at its natural speed
         if let Ok(Some(results)) = session.browse(&[browse_description]) {
             if let Some(result) = results.first() {
                 if result.status_code.is_good() {
@@ -1557,7 +1593,96 @@ fn search_nodes_by_name(
                             let display_name = reference.display_name.text.as_ref();
                             let browse_name = &reference.browse_name.name;
                             
-                            // Check if display name or browse name matches search term
+                            // Check for exact matches first, then partial matches
+                            let exact_display_match = display_name.eq_ignore_ascii_case(search_term);
+                            let exact_browse_match = browse_name.to_string().eq_ignore_ascii_case(search_term);
+                            let partial_display_match = display_name.to_lowercase().contains(&search_term.to_lowercase());
+                            let partial_browse_match = browse_name.to_string().to_lowercase().contains(&search_term.to_lowercase());
+                            
+                            if exact_display_match || exact_browse_match || partial_display_match || partial_browse_match {
+                                found_nodes.push((
+                                    reference.node_id.node_id.clone(),
+                                    display_name.to_string(),
+                                    reference.node_class,
+                                ));
+                                
+                                if verbose {
+                                    println!("    ✅ Found: '{}' (ns={}, depth={}, class: {:?})", 
+                                        display_name, reference.node_id.node_id.namespace, depth, reference.node_class);
+                                }
+                                
+                                // Early termination on exact match for speed
+                                if exact_display_match || exact_browse_match {
+                                    if verbose {
+                                        println!("    🎯 Exact match found, stopping search early");
+                                    }
+                                    return Ok(found_nodes);
+                                }
+                            }
+                            
+                            // Add child nodes for next depth level
+                            if depth < max_depth {
+                                nodes_to_browse.push((reference.node_id.node_id.clone(), depth + 1));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    if verbose {
+        println!("    📊 Depth-limited search completed: {} nodes searched, {} matches found", 
+            browsed_nodes.len(), found_nodes.len());
+    }
+    
+    Ok(found_nodes)
+}
+
+fn search_nodes_deep(
+    session: &opcua::client::prelude::Session,
+    search_term: &str,
+    verbose: bool,
+) -> Result<Vec<(NodeId, String, NodeClass)>> {
+    let mut found_nodes = Vec::new();
+    let mut nodes_to_browse = vec![
+        NodeId::new(0, 85),   // Objects folder
+        NodeId::new(0, 2253), // Server node
+        NodeId::new(0, 86),   // Types folder
+    ];
+    let mut browsed_nodes = HashSet::new();
+    let max_nodes = 500;  // Reduced from 2000 for better performance
+    let max_queue = 200;  // Reduced queue size
+    
+    while let Some(node_id) = nodes_to_browse.pop() {
+        let node_key = format!("{:?}", node_id);
+        if browsed_nodes.contains(&node_key) || browsed_nodes.len() >= max_nodes {
+            continue;
+        }
+        browsed_nodes.insert(node_key);
+        
+        if verbose && browsed_nodes.len() % 50 == 0 {
+            println!("    🔍 Deep search: {} nodes (ns={})...", browsed_nodes.len(), node_id.namespace);
+        }
+        
+        let browse_description = BrowseDescription {
+            node_id: node_id.clone(),
+            browse_direction: BrowseDirection::Forward,
+            reference_type_id: ReferenceTypeId::HierarchicalReferences.into(),
+            include_subtypes: true,
+            node_class_mask: 0,
+            result_mask: 0x3F,
+        };
+        
+        // No delays - removed completely for speed
+        if let Ok(Some(results)) = session.browse(&[browse_description]) {
+            if let Some(result) = results.first() {
+                if result.status_code.is_good() {
+                    if let Some(ref references) = result.references {
+                        for reference in references {
+                            let display_name = reference.display_name.text.as_ref();
+                            let browse_name = &reference.browse_name.name;
+                            
                             let display_matches = display_name.to_lowercase().contains(&search_term.to_lowercase());
                             let browse_matches = browse_name.to_string().to_lowercase().contains(&search_term.to_lowercase());
                             
@@ -1574,7 +1699,7 @@ fn search_nodes_by_name(
                                 }
                             }
                             
-                            // Add ALL child nodes to search queue (cross-namespace discovery)
+                            // Add child nodes to queue with limits
                             if browsed_nodes.len() < max_nodes && nodes_to_browse.len() < max_queue {
                                 nodes_to_browse.push(reference.node_id.node_id.clone());
                             }
@@ -1586,7 +1711,7 @@ fn search_nodes_by_name(
     }
     
     if verbose {
-        println!("    📊 Search completed: {} nodes searched, {} matches found", 
+        println!("    📊 Deep search completed: {} nodes searched, {} matches found", 
             browsed_nodes.len(), found_nodes.len());
     }
     
@@ -1605,7 +1730,7 @@ fn search_for_method(
     if found_methods.is_empty() {
         // Provide comprehensive troubleshooting guidance
         let error_msg = format!(
-            "No methods found with name: '{}'\n\n  💡 Troubleshooting steps:\n     1. Use 'browse' to explore the server and find available methods:\n        opcua-walker browse\n     2. Look for the method in different server areas:\n        opcua-walker browse --node \"ns=0;i=85\"  # Objects folder\n        opcua-walker browse --node \"ns=0;i=2253\" # Server node\n     3. Try searching with partial names or check for typos:\n        opcua-walker call \"reboot\" --verbose  # case-insensitive\n        opcua-walker call \"restart\" --verbose # alternative name\n     4. Use exact node IDs if you know them:\n        opcua-walker call \"ns=X;s=MethodName\" \"ns=X;s=ObjectName\"\n     5. Check if the method might be in a namespace other than 0:\n        opcua-walker browse --all-attributes\n     6. Enable verbose mode for detailed search diagnostics:\n        opcua-walker call \"{}\" --verbose\n\n  🔍 The search looked in:\n     • Objects folder (ns=0;i=85)\n     • Server node (ns=0;i=2253)\n     • Server capabilities and diagnostics\n     • Up to 200 nodes in the address space\n\n  ⚠️  If the method exists but wasn't found, it might be:\n     • In a custom namespace (ns=1, ns=2, etc.)\n     • Deeper in the hierarchy than searched\n     • Referenced through non-standard references\n     • Requires special permissions to access", 
+            "No methods found with name: '{}'\n\n  💡 Troubleshooting steps:\n     1. Use 'browse' to explore the server and find available methods:\n        opcua-walker browse\n     2. Look for the method in different server areas:\n        opcua-walker browse --node \"ns=0;i=85\"  # Objects folder\n        opcua-walker browse --node \"ns=0;i=2253\" # Server node\n     3. Try searching with partial names or check for typos:\n        opcua-walker call \"reboot\" --verbose  # case-insensitive\n        opcua-walker call \"restart\" --verbose # alternative name\n     4. Use exact node IDs if you know them:\n        opcua-walker call \"ns=X;s=MethodName\" \"ns=X;s=ObjectName\"\n     5. Check if the method might be in a namespace other than 0:\n        opcua-walker browse --all-attributes\n     6. Enable verbose mode for detailed search diagnostics:\n        opcua-walker call \"{}\" --verbose\n\n  🔍 The progressive search looked in:\n     • Quick search: depth 3 from Objects, Server, Types folders\n     • Broader search: depth 5 from same areas  \n     • Deep search: up to 500 nodes across all namespaces\n\n  ⚠️  If the method exists but wasn't found, it might be:\n     • In a custom namespace (ns=1, ns=2, etc.)\n     • Deeper than 5 levels in the hierarchy\n     • Referenced through non-standard references\n     • Requires special permissions to access", 
             method_id, method_id
         );
         return Err(anyhow::anyhow!(error_msg));
@@ -1640,13 +1765,132 @@ fn search_methods_by_name(
     method_name: &str,
     verbose: bool,
 ) -> Result<Vec<(NodeId, NodeId, String)>> {
-    // Use the same comprehensive search strategy as read --search
+    // Use progressive search strategy like read --search for better performance
     if verbose {
-        println!("    🔄 Starting comprehensive method search across all namespaces...");
+        println!("    🎯 Starting progressive method search for: '{}'", method_name);
     }
     
-    // Use consistent limits with read --search for reliable results
-    search_methods_with_limits(session, method_name, 2000, 500, verbose)
+    // Stage 1: Quick method search (depth-limited)
+    let quick_results = search_methods_with_depth_limit(session, method_name, 3, verbose)?;
+    if !quick_results.is_empty() {
+        if verbose {
+            println!("    ✅ Quick method search found {} matches", quick_results.len());
+        }
+        return Ok(quick_results);
+    }
+    
+    // Stage 2: Broader method search
+    if verbose {
+        println!("    🔄 No quick matches, trying broader method search...");
+    }
+    let broader_results = search_methods_with_depth_limit(session, method_name, 5, verbose)?;
+    if !broader_results.is_empty() {
+        if verbose {
+            println!("    ✅ Broader method search found {} matches", broader_results.len());
+        }
+        return Ok(broader_results);
+    }
+    
+    // Stage 3: Deep method search as last resort
+    if verbose {
+        println!("    🔍 No matches yet, trying deep method search...");
+    }
+    search_methods_with_limits(session, method_name, 500, 200, verbose)
+}
+
+fn search_methods_with_depth_limit(
+    session: &opcua::client::prelude::Session,
+    method_name: &str,
+    max_depth: u32,
+    verbose: bool,
+) -> Result<Vec<(NodeId, NodeId, String)>> {
+    let mut found_methods: Vec<(NodeId, NodeId, String)> = Vec::new();
+    let mut nodes_to_browse = vec![
+        (NodeId::new(0, 85), 0),   // Objects folder
+        (NodeId::new(0, 2253), 0), // Server node
+        (NodeId::new(0, 86), 0),   // Types folder
+    ];
+    let mut browsed_nodes = HashSet::new();
+    
+    while let Some((node_id, depth)) = nodes_to_browse.pop() {
+        if depth > max_depth {
+            continue;
+        }
+        
+        let node_key = format!("{:?}", node_id);
+        if browsed_nodes.contains(&node_key) {
+            continue;
+        }
+        browsed_nodes.insert(node_key);
+        
+        let browse_description = BrowseDescription {
+            node_id: node_id.clone(),
+            browse_direction: BrowseDirection::Forward,
+            reference_type_id: ReferenceTypeId::HierarchicalReferences.into(),
+            include_subtypes: true,
+            node_class_mask: 0,
+            result_mask: 0x3F,
+        };
+        
+        // No artificial delays for speed
+        if let Ok(Some(results)) = session.browse(&[browse_description]) {
+            if let Some(result) = results.first() {
+                if result.status_code.is_good() {
+                    if let Some(ref references) = result.references {
+                        for reference in references {
+                            let display_name = reference.display_name.text.as_ref();
+                            let browse_name = &reference.browse_name.name;
+                            
+                            // Only process Method nodes
+                            if reference.node_class == NodeClass::Method {
+                                let exact_display_match = display_name.eq_ignore_ascii_case(method_name);
+                                let exact_browse_match = browse_name.to_string().eq_ignore_ascii_case(method_name);
+                                let partial_display_match = display_name.to_lowercase().contains(&method_name.to_lowercase());
+                                let partial_browse_match = browse_name.to_string().to_lowercase().contains(&method_name.to_lowercase());
+                                
+                                if exact_display_match || exact_browse_match || partial_display_match || partial_browse_match {
+                                    let parent_object_id = node_id.clone();
+                                    let parent_name = get_node_display_name(session, &parent_object_id)
+                                        .unwrap_or_else(|_| format!("{}", parent_object_id));
+                                    
+                                    found_methods.push((
+                                        reference.node_id.node_id.clone(),
+                                        parent_object_id,
+                                        parent_name.clone(),
+                                    ));
+                                    
+                                    if verbose {
+                                        println!("    ✅ Found method: '{}' (ns={}, depth={}) in object: '{}'", 
+                                            display_name, reference.node_id.node_id.namespace, depth, parent_name);
+                                    }
+                                    
+                                    // Early termination on exact match
+                                    if exact_display_match || exact_browse_match {
+                                        if verbose {
+                                            println!("    🎯 Exact method match found, stopping search early");
+                                        }
+                                        return Ok(found_methods);
+                                    }
+                                }
+                            }
+                            
+                            // Add child nodes for next depth level
+                            if depth < max_depth {
+                                nodes_to_browse.push((reference.node_id.node_id.clone(), depth + 1));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    if verbose {
+        println!("    📊 Depth-limited method search completed: {} nodes searched, {} methods found", 
+            browsed_nodes.len(), found_methods.len());
+    }
+    
+    Ok(found_methods)
 }
 
 fn search_methods_with_limits(
@@ -1685,9 +1929,7 @@ fn search_methods_with_limits(
             result_mask: 0x3F, // All attributes
         };
         
-        // Small delay to be gentle on the server
-        std::thread::sleep(std::time::Duration::from_millis(2));
-        
+        // No delays - removed completely for speed
         if let Ok(Some(results)) = session.browse(&[browse_description]) {
             if let Some(result) = results.first() {
                 if result.status_code.is_good() {
