@@ -3,9 +3,10 @@ use clap::{Parser, Subcommand};
 use colored::*;
 use opcua::client::prelude::*;
 use opcua::sync::RwLock;
-use opcua::types::{AttributeId, Identifier, QualifiedName, UAString};
+use opcua::types::{AttributeId, Identifier, QualifiedName, UAString, CallMethodRequest};
 use std::sync::Arc;
 use std::str::FromStr;
+use std::collections::HashSet;
 
 #[derive(Parser)]
 #[command(name = "opcua-walker")]
@@ -56,7 +57,7 @@ enum Commands {
     },
     /// Read node information and attributes
     Read {
-        /// Node ID(s) to read (can specify multiple)
+        /// Node ID(s) to read (can specify multiple) or name to search for
         node_ids: Vec<String>,
         
         /// Read all available attributes (default: basic info only)
@@ -66,6 +67,26 @@ enum Commands {
         /// Force include node value for all nodes (Variable nodes include values by default)
         #[arg(short = 'V', long)]
         include_value: bool,
+        
+        /// Search for nodes by display name instead of using exact node ID
+        #[arg(short, long)]
+        search: bool,
+    },
+    /// Call a method on the server
+    Call {
+        /// Method node ID to call
+        method_id: String,
+        
+        /// Object node ID that owns the method
+        object_id: String,
+        
+        /// Input arguments for the method (JSON format or simple values)
+        #[arg(short, long)]
+        args: Option<String>,
+        
+        /// Show detailed call information
+        #[arg(short, long)]
+        verbose: bool,
     },
     /// Show server information
     Info,
@@ -86,12 +107,14 @@ fn main() -> Result<()> {
         );
     }
 
-    // Configure minimal client but with keypair generation
+    // Configure client with more tolerant settings
     let mut client = ClientBuilder::new()
         .application_name("OPC-UA Walker")
         .application_uri("urn:opcua-walker")
         .create_sample_keypair(true)
         .trust_server_certs(true)
+        .max_message_size(8192000) // Increase message size limit
+        .max_chunk_count(1000)     // Increase chunk count
         .client()
         .ok_or_else(|| anyhow::anyhow!("Failed to create OPC-UA client"))?;
 
@@ -166,8 +189,15 @@ fn main() -> Result<()> {
             let start_node = node.as_deref().unwrap_or("ns=0;i=85"); // Objects folder
             browse_address_space(session.clone(), start_node, *depth, cli.verbose)?;
         }
-        Commands::Read { node_ids, all_attributes, include_value } => {
-            read_node_information(session.clone(), node_ids, *all_attributes, *include_value, cli.verbose)?;
+        Commands::Read { node_ids, all_attributes, include_value, search } => {
+            if *search {
+                read_nodes_by_search(session.clone(), node_ids, *all_attributes, *include_value, cli.verbose)?;
+            } else {
+                read_node_information(session.clone(), node_ids, *all_attributes, *include_value, cli.verbose)?;
+            }
+        }
+        Commands::Call { method_id, object_id, args, verbose } => {
+            call_method(session.clone(), method_id, object_id, args.as_deref(), *verbose || cli.verbose)?;
         }
         Commands::Info => {
             show_server_info(session.clone(), cli.verbose)?;
@@ -1141,4 +1171,347 @@ fn show_server_info(session: Arc<RwLock<Session>>, verbose: bool) -> Result<()> 
     );
 
     Ok(())
+}
+
+fn call_method(
+    session: Arc<RwLock<Session>>,
+    method_id: &str,
+    object_id: &str,
+    args: Option<&str>,
+    verbose: bool,
+) -> Result<()> {
+    println!("\n{}", "⚡ Calling Method".bright_green().bold());
+    println!("Method ID: {}", method_id.bright_yellow());
+    println!("Object ID: {}", object_id.bright_yellow());
+    
+    if let Some(args_str) = args {
+        println!("Input Arguments: {}", args_str.bright_blue());
+    } else {
+        println!("Input Arguments: {}", "None".dimmed());
+    }
+
+    let session_lock = session.read();
+
+    // Parse node IDs
+    let method_node = parse_node_id(method_id)?;
+    let object_node = parse_node_id(object_id)?;
+
+    // Parse input arguments
+    let input_args = if let Some(args_str) = args {
+        parse_method_arguments(args_str)?
+    } else {
+        Vec::new()
+    };
+
+    if verbose {
+        println!("Parsed method node: {:?}", method_node);
+        println!("Parsed object node: {:?}", object_node);
+        println!("Parsed input arguments: {:?}", input_args);
+    }
+
+    // Create method call request
+    let call_request = CallMethodRequest {
+        object_id: object_node,
+        method_id: method_node,
+        input_arguments: Some(input_args),
+    };
+
+    // Execute method call
+    match session_lock.call(call_request) {
+        Ok(result) => {
+            println!("\n{}", "📤 Method Call Result".bright_blue().bold());
+            
+            let status = &result.status_code;
+            if status.is_good() {
+                println!("  Status: {}", "Success".bright_green());
+                
+                // Display output arguments
+                if let Some(ref output_args) = result.output_arguments {
+                    if !output_args.is_empty() {
+                        println!("  Output Arguments:");
+                        for (i, arg) in output_args.iter().enumerate() {
+                            println!("    [{}] {} ({})", 
+                                i, 
+                                format_value(arg).bright_white(), 
+                                get_variant_type_name(arg).bright_yellow()
+                            );
+                        }
+                    } else {
+                        println!("  Output Arguments: {}", "None".dimmed());
+                    }
+                } else {
+                    println!("  Output Arguments: {}", "None".dimmed());
+                }
+                
+                println!("  {}", "✅ Method call completed successfully".bright_green());
+            } else {
+                println!("  Status: {} ({:?})", "Failed".bright_red(), status);
+                
+                // Still try to display output arguments for diagnostic purposes
+                if let Some(ref output_args) = result.output_arguments {
+                    if !output_args.is_empty() {
+                        println!("  Output Arguments (diagnostic):");
+                        for (i, arg) in output_args.iter().enumerate() {
+                            println!("    [{}] {} ({})", 
+                                i, 
+                                format_value(arg).bright_white(), 
+                                get_variant_type_name(arg).bright_yellow()
+                            );
+                        }
+                    }
+                }
+                
+                return Err(anyhow::anyhow!("Method call failed with status: {:?}", status));
+            }
+        }
+        Err(e) => {
+            return Err(anyhow::anyhow!("Method call failed: {}", e));
+        }
+    }
+
+    Ok(())
+}
+
+fn parse_method_arguments(args_str: &str) -> Result<Vec<Variant>> {
+    let mut arguments = Vec::new();
+    
+    // Try to parse as JSON first
+    if args_str.trim().starts_with('[') {
+        match serde_json::from_str::<Vec<serde_json::Value>>(args_str) {
+            Ok(json_args) => {
+                for json_arg in json_args {
+                    arguments.push(json_value_to_variant(json_arg)?);
+                }
+                return Ok(arguments);
+            }
+            Err(_) => {
+                // Fall through to simple parsing
+            }
+        }
+    }
+    
+    // Simple comma-separated parsing
+    if args_str.contains(',') {
+        for arg in args_str.split(',') {
+            arguments.push(parse_simple_argument(arg.trim())?);
+        }
+    } else if !args_str.trim().is_empty() {
+        arguments.push(parse_simple_argument(args_str.trim())?);
+    }
+    
+    Ok(arguments)
+}
+
+fn json_value_to_variant(value: serde_json::Value) -> Result<Variant> {
+    match value {
+        serde_json::Value::Bool(b) => Ok(Variant::Boolean(b)),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                if i >= i32::MIN as i64 && i <= i32::MAX as i64 {
+                    Ok(Variant::Int32(i as i32))
+                } else {
+                    Ok(Variant::Int64(i))
+                }
+            } else if let Some(f) = n.as_f64() {
+                Ok(Variant::Double(f))
+            } else {
+                Err(anyhow::anyhow!("Invalid number format"))
+            }
+        }
+        serde_json::Value::String(s) => Ok(Variant::String(UAString::from(s))),
+        serde_json::Value::Array(arr) => {
+            let mut variants = Vec::new();
+            for item in arr {
+                variants.push(json_value_to_variant(item)?);
+            }
+            // Create array with unknown type - let OPC-UA figure it out
+            match opcua::types::Array::new(opcua::types::VariantTypeId::Empty, variants) {
+                Ok(array) => Ok(Variant::Array(Box::new(array))),
+                Err(e) => Err(anyhow::anyhow!("Failed to create array: {:?}", e))
+            }
+        }
+        serde_json::Value::Null => Ok(Variant::Empty),
+        _ => Err(anyhow::anyhow!("Unsupported JSON value type")),
+    }
+}
+
+fn parse_simple_argument(arg: &str) -> Result<Variant> {
+    // Try boolean
+    if arg.eq_ignore_ascii_case("true") {
+        return Ok(Variant::Boolean(true));
+    }
+    if arg.eq_ignore_ascii_case("false") {
+        return Ok(Variant::Boolean(false));
+    }
+    
+    // Try integer
+    if let Ok(i) = arg.parse::<i32>() {
+        return Ok(Variant::Int32(i));
+    }
+    
+    // Try float
+    if let Ok(f) = arg.parse::<f64>() {
+        return Ok(Variant::Double(f));
+    }
+    
+    // Default to string
+    Ok(Variant::String(UAString::from(arg)))
+}
+
+fn read_nodes_by_search(
+    session: Arc<RwLock<Session>>,
+    search_terms: &[String],
+    all_attributes: bool,
+    include_value: bool,
+    verbose: bool,
+) -> Result<()> {
+    println!("\n{}", "🔍 Searching for Nodes".bright_green().bold());
+    
+    if search_terms.is_empty() {
+        return Err(anyhow::anyhow!("No search terms provided"));
+    }
+    
+    println!("Search terms:");
+    for term in search_terms {
+        println!("  • {}", term.bright_yellow());
+    }
+
+    let session_lock = session.read();
+    
+    let mut all_found_nodes = Vec::new();
+    
+    for search_term in search_terms {
+        println!("\n{}", format!("🔎 Searching for: {}", search_term).bright_blue().bold());
+        
+        let found_nodes = search_nodes_by_name(&session_lock, search_term, verbose)?;
+        
+        if found_nodes.is_empty() {
+            println!("  {} No nodes found matching '{}'", "❌".red(), search_term);
+        } else {
+            println!("  {} Found {} matching node(s):", "✅".bright_green(), found_nodes.len());
+            
+            for (i, (node_id, display_name, node_class)) in found_nodes.iter().enumerate() {
+                let (icon, class_name) = get_node_class_info(*node_class);
+                println!("    [{}] {} {} {} ({})", 
+                    i + 1,
+                    icon,
+                    display_name.bright_white(), 
+                    class_name.dimmed(),
+                    format!("{}", node_id).dimmed()
+                );
+            }
+            
+            all_found_nodes.extend(found_nodes);
+        }
+    }
+    
+    if all_found_nodes.is_empty() {
+        println!("\n{} No nodes found for any search terms", "❌".red());
+        return Ok(());
+    }
+    
+    // Read information for all found nodes
+    println!("\n{}", "📖 Reading Node Information".bright_blue().bold());
+    
+    for (i, (node_id, display_name, _node_class)) in all_found_nodes.iter().enumerate() {
+        if i > 0 {
+            println!("\n{}", "─".repeat(60).dimmed());
+        }
+        
+        println!("\n{}", format!("📋 Node: {} ({})", display_name, node_id).bright_blue().bold());
+        
+        let node_id_str = format!("{}", node_id);
+        match read_single_node_info(&session_lock, &node_id_str, all_attributes, include_value, verbose) {
+            Ok(_) => {
+                println!("  {}", "✅ Successfully read node information".bright_green());
+            }
+            Err(e) => {
+                println!("  {}Error reading node {}: {}", "❌ ".red(), node_id, e);
+                if verbose {
+                    println!("     Details: {:?}", e);
+                }
+            }
+        }
+    }
+    
+    println!(
+        "\n{}",
+        format!("✅ Search and read completed - {} nodes processed", all_found_nodes.len()).bright_green()
+    );
+    
+    Ok(())
+}
+
+fn search_nodes_by_name(
+    session: &opcua::client::prelude::Session,
+    search_term: &str,
+    verbose: bool,
+) -> Result<Vec<(NodeId, String, NodeClass)>> {
+    let mut found_nodes = Vec::new();
+    let mut nodes_to_browse = vec![NodeId::new(0, 85)]; // Start from Objects folder
+    let mut browsed_nodes = HashSet::new();
+    let _max_search_depth = 5; // Limit search depth to avoid infinite loops
+    
+    // Also search in Server node and Types
+    nodes_to_browse.push(NodeId::new(0, 2253)); // Server
+    nodes_to_browse.push(NodeId::new(0, 86)); // Types
+    
+    while let Some(node_id) = nodes_to_browse.pop() {
+        // Avoid infinite loops
+        let node_key = format!("{:?}", node_id);
+        if browsed_nodes.contains(&node_key) || browsed_nodes.len() > 1000 {
+            continue;
+        }
+        browsed_nodes.insert(node_key);
+        
+        if verbose {
+            println!("    🔍 Searching in node: {:?}", node_id);
+        }
+        
+        // Create browse request
+        let browse_description = BrowseDescription {
+            node_id: node_id.clone(),
+            browse_direction: BrowseDirection::Forward,
+            reference_type_id: ReferenceTypeId::HierarchicalReferences.into(),
+            include_subtypes: true,
+            node_class_mask: 0, // All node classes
+            result_mask: 0x3F, // All result mask bits
+        };
+        
+        if let Ok(Some(results)) = session.browse(&[browse_description]) {
+            if let Some(result) = results.first() {
+                if result.status_code.is_good() {
+                    if let Some(ref references) = result.references {
+                        for reference in references {
+                            let display_name = reference.display_name.text.as_ref();
+                            let browse_name = &reference.browse_name.name;
+                            
+                            // Check if display name or browse name matches search term
+                            let display_matches = display_name.to_lowercase().contains(&search_term.to_lowercase());
+                            let browse_matches = browse_name.to_string().to_lowercase().contains(&search_term.to_lowercase());
+                            
+                            if display_matches || browse_matches {
+                                found_nodes.push((
+                                    reference.node_id.node_id.clone(),
+                                    display_name.to_string(),
+                                    reference.node_class,
+                                ));
+                            }
+                            
+                            // Add child nodes to search queue if we haven't reached max depth
+                            if browsed_nodes.len() < 500 && nodes_to_browse.len() < 100 {
+                                nodes_to_browse.push(reference.node_id.node_id.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    if verbose {
+        println!("    📊 Searched {} nodes total", browsed_nodes.len());
+    }
+    
+    Ok(found_nodes)
 }
