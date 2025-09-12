@@ -87,6 +87,10 @@ enum Commands {
         /// Show detailed call information
         #[arg(short, long)]
         verbose: bool,
+        
+        /// Skip auto-search and require exact node IDs (avoids server overload)
+        #[arg(long)]
+        no_search: bool,
     },
     /// Show server information
     Info,
@@ -274,8 +278,8 @@ fn main() -> Result<()> {
                 read_node_information(session.clone(), node_ids, *all_attributes, *include_value, cli.verbose)?;
             }
         }
-        Commands::Call { method_id, object_id, args, verbose } => {
-            call_method(session.clone(), method_id, object_id.as_deref(), args.as_deref(), *verbose || cli.verbose)?;
+        Commands::Call { method_id, object_id, args, verbose, no_search } => {
+            call_method(session.clone(), method_id, object_id.as_deref(), args.as_deref(), *verbose || cli.verbose, *no_search)?;
         }
         Commands::Info => {
             show_server_info(session.clone(), cli.verbose)?;
@@ -1257,6 +1261,7 @@ fn call_method(
     object_id: Option<&str>,
     args: Option<&str>,
     verbose: bool,
+    no_search: bool,
 ) -> Result<()> {
     println!("\n{}", "⚡ Calling Method".bright_green().bold());
     println!("Method: {}", method_id.bright_yellow());
@@ -1268,8 +1273,35 @@ fn call_method(
         // Both method and object IDs provided - use directly
         println!("Object ID: {}", object_id_str.bright_yellow());
         (parse_node_id(method_id)?, parse_node_id(object_id_str)?)
+    } else if no_search {
+        // No search allowed - require explicit node IDs
+        println!("Object ID: {}", "None (--no-search specified)".dimmed());
+        
+        // Try to parse method_id as a node ID
+        match parse_node_id(method_id) {
+            Ok(method_node_id) => {
+                println!("  ⚠️  Warning: Using method node as both method and object (might not work)");
+                println!("     Recommendation: Provide explicit object ID:");
+                println!("     opcua-walker call \"{}\" \"<object-node-id>\"", method_id);
+                (method_node_id.clone(), method_node_id)
+            }
+            Err(_) => {
+                return Err(anyhow::anyhow!(
+                    "Cannot parse '{}' as node ID and --no-search is enabled\n\n\
+                     The --no-search flag requires exact node IDs.\n\
+                     Either:\n\
+                     1. Provide both method and object node IDs:\n\
+                        opcua-walker call \"ns=X;s=MethodName\" \"ns=X;s=ObjectName\" --no-search\n\
+                     2. Remove --no-search to enable auto-search:\n\
+                        opcua-walker call \"MethodName\"\n\
+                     3. Find exact node IDs first:\n\
+                        opcua-walker browse", 
+                    method_id
+                ));
+            }
+        }
     } else {
-        // Only method name provided - try different search strategies
+        // Auto-search enabled (default behavior)
         println!("Object ID: {}", "Auto-searching...".dimmed());
         
         // First, try to interpret method_id as a node ID in case user provided one
@@ -1353,17 +1385,45 @@ fn call_method(
                 
                 // Provide specific guidance for common error codes
                 let status_str = format!("{:?}", status);
+                
+                // Handle the specific combination that the user reported
+                if status_str.contains("BadTooManyOperations") && status_str.contains("BadLicenseNotAvailable") && status_str.contains("BadUnexpectedError") {
+                    println!("\n  🚨 {}", "Multiple error conditions detected - this usually indicates search overload".bright_red());
+                    println!("  💡 {}", "The auto-search likely triggered server limits before method execution".bright_yellow());
+                    println!("     {} Use exact node IDs to bypass search completely:", "Solution:".bright_green());
+                    println!("     1. Find your method with: opcua-walker browse");
+                    println!("     2. Call directly: opcua-walker call \"ns=X;i=123\" \"ns=X;i=456\"");
+                    println!("     3. Or add --no-search flag if implemented");
+                    println!("");
+                    println!("  📋 {}", "This error combination typically means:".bright_blue());
+                    println!("     • BadTooManyOperations: Search hit server browse limits");
+                    println!("     • BadLicenseNotAvailable: Server licensing issue (separate from search)");
+                    println!("     • BadUnexpectedError: Cascading error from the above");
+                } else {
+                    // Individual error handling for single conditions
+                    if status_str.contains("BadTooManyOperations") {
+                        println!("  💡 {}", "Server overwhelmed by too many browse operations".bright_yellow());
+                        println!("     Try: opcua-walker call \"ns=X;s=MethodName\" \"ns=X;s=ObjectName\"");
+                        println!("     Or first browse to find exact node IDs");
+                    }
+                    if status_str.contains("BadLicenseNotAvailable") {
+                        println!("  💡 {}", "Server licensing issue".bright_yellow());
+                        println!("     Contact server administrator about OPC-UA server licensing");
+                        println!("     This is a server-side configuration issue, not a client problem");
+                    }
+                    if status_str.contains("BadUnexpectedError") {
+                        println!("  💡 {}", "Method execution issue".bright_yellow());
+                        println!("     Try with explicit arguments: --args \"arg1,arg2\"");
+                        println!("     Or verify method signature and permissions");
+                    }
+                }
+                
+                // Additional guidance for search-related failures
                 if status_str.contains("BadTooManyOperations") {
-                    println!("  💡 {}", "Suggestion: The server may be overwhelmed by too many browse operations.".bright_yellow());
-                    println!("     Try using the exact node ID instead: opcua-walker call \"ns=X;s=MethodName\" \"ns=X;s=ObjectName\"");
-                }
-                if status_str.contains("BadLicenseNotAvailable") {
-                    println!("  💡 {}", "Suggestion: The server may require a license for method execution.".bright_yellow());
-                    println!("     Check server licensing requirements or contact server administrator.");
-                }
-                if status_str.contains("BadUnexpectedError") {
-                    println!("  💡 {}", "Suggestion: The method may require specific arguments or have execution restrictions.".bright_yellow());
-                    println!("     Try calling with explicit arguments: --args \"[arg1, arg2]\" or check method signature.");
+                    println!("  🔧 {}", "To avoid search issues:".bright_cyan());
+                    println!("     • Use browse command first to explore manually");
+                    println!("     • Copy exact node IDs for direct calling");
+                    println!("     • Search operations can overwhelm some servers");
                 }
                 
                 // Still try to display output arguments for diagnostic purposes
@@ -1782,7 +1842,7 @@ fn search_for_method(
     if found_methods.is_empty() {
         // Provide comprehensive troubleshooting guidance
         let error_msg = format!(
-            "No methods found with name: '{}'\n\n  💡 Troubleshooting steps:\n     1. Use 'browse' to explore the server and find available methods:\n        opcua-walker browse\n     2. Look for the method in different server areas:\n        opcua-walker browse --node \"ns=0;i=85\"  # Objects folder\n        opcua-walker browse --node \"ns=0;i=2253\" # Server node\n     3. Try searching with partial names or check for typos:\n        opcua-walker call \"reboot\" --verbose  # case-insensitive\n        opcua-walker call \"restart\" --verbose # alternative name\n     4. Use exact node IDs if you know them:\n        opcua-walker call \"ns=X;s=MethodName\" \"ns=X;s=ObjectName\"\n     5. Check if the method might be in a namespace other than 0:\n        opcua-walker browse --all-attributes\n     6. Enable verbose mode for detailed search diagnostics:\n        opcua-walker call \"{}\" --verbose\n\n  🔍 The progressive search looked in:\n     • Quick search: depth 3 from Objects, Server, Types folders\n     • Broader search: depth 5 from same areas  \n     • Deep search: up to 500 nodes across all namespaces\n\n  ⚠️  If the method exists but wasn't found, it might be:\n     • In a custom namespace (ns=1, ns=2, etc.)\n     • Deeper than 5 levels in the hierarchy\n     • Referenced through non-standard references\n     • Requires special permissions to access", 
+            "No methods found with name: '{}'\n\n  💡 Troubleshooting steps:\n     1. Use 'browse' to explore the server and find available methods:\n        opcua-walker browse\n     2. Look for the method in different server areas:\n        opcua-walker browse --node \"ns=0;i=85\"  # Objects folder\n        opcua-walker browse --node \"ns=0;i=2253\" # Server node\n     3. Try searching with partial names or check for typos:\n        opcua-walker call \"reboot\" --verbose  # case-insensitive\n        opcua-walker call \"restart\" --verbose # alternative name\n     4. Use exact node IDs if you know them:\n        opcua-walker call \"ns=X;s=MethodName\" \"ns=X;s=ObjectName\"\n     5. For servers with strict browse limits, skip auto-search:\n        opcua-walker call \"ns=X;i=123\" \"ns=X;i=456\" --no-search\n     6. Check if the method might be in a namespace other than 0:\n        opcua-walker browse --all-attributes\n     7. Enable verbose mode for detailed search diagnostics:\n        opcua-walker call \"{}\" --verbose\n\n  🔍 The conservative search looked in:\n     • Quick search: depth 3 from Objects, Server, Types folders\n     • Broader search: depth 5 from same areas  \n     • Deep search: up to 100 nodes across all namespaces (limited to avoid server overload)\n\n  ⚠️  If the method exists but wasn't found, it might be:\n     • In a custom namespace (ns=1, ns=2, etc.)\n     • Deeper than 5 levels in the hierarchy\n     • Referenced through non-standard references\n     • Requires special permissions to access\n     • Server has strict browse operation limits", 
             method_id, method_id
         );
         return Err(anyhow::anyhow!(error_msg));
@@ -1847,7 +1907,7 @@ fn search_methods_by_name(
     if verbose {
         println!("    🔍 No matches yet, trying deep method search...");
     }
-    search_methods_with_limits(session, method_name, 500, 200, verbose)
+    search_methods_with_limits(session, method_name, 100, 50, verbose)  // Much more conservative limits
 }
 
 fn search_methods_with_depth_limit(
@@ -1960,14 +2020,23 @@ fn search_methods_with_limits(
     ];
     let mut browsed_nodes = HashSet::new();
     
+    // Use even more conservative limits to avoid server overload
+    let conservative_max_nodes = std::cmp::min(max_nodes, 100);  // Cap at 100 nodes max
+    let conservative_max_queue = std::cmp::min(max_queue, 50);   // Cap at 50 queue max
+    
+    if verbose {
+        println!("    🎯 Using conservative search limits: {} nodes, {} queue", 
+            conservative_max_nodes, conservative_max_queue);
+    }
+    
     while let Some(node_id) = nodes_to_browse.pop() {
         let node_key = format!("{:?}", node_id);
-        if browsed_nodes.contains(&node_key) || browsed_nodes.len() >= max_nodes {
+        if browsed_nodes.contains(&node_key) || browsed_nodes.len() >= conservative_max_nodes {
             continue;
         }
         browsed_nodes.insert(node_key);
         
-        if verbose && browsed_nodes.len() % 50 == 0 {
+        if verbose && browsed_nodes.len() % 10 == 0 {
             println!("    🔍 Searched {} nodes (ns={})...", browsed_nodes.len(), node_id.namespace);
         }
         
@@ -1981,7 +2050,9 @@ fn search_methods_with_limits(
             result_mask: 0x3F, // All attributes
         };
         
-        // No delays - removed completely for speed
+        // Add small delay to be gentler on servers that are sensitive to rapid requests
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        
         if let Ok(Some(results)) = session.browse(&[browse_description]) {
             if let Some(result) = results.first() {
                 if result.status_code.is_good() {
@@ -2025,7 +2096,7 @@ fn search_methods_with_limits(
                             
                             // Add ALL child nodes to search queue (like read --search does)
                             // This allows discovery of nodes in other namespaces
-                            if browsed_nodes.len() < max_nodes && nodes_to_browse.len() < max_queue {
+                            if browsed_nodes.len() < conservative_max_nodes && nodes_to_browse.len() < conservative_max_queue {
                                 nodes_to_browse.push(reference.node_id.node_id.clone());
                             }
                         }
@@ -2036,7 +2107,7 @@ fn search_methods_with_limits(
     }
     
     if verbose {
-        println!("    📊 Search completed: {} nodes searched, {} methods found", 
+        println!("    📊 Conservative search completed: {} nodes searched, {} methods found", 
             browsed_nodes.len(), found_methods.len());
     }
     
