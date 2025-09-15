@@ -5,10 +5,10 @@ use opcua::types::*;
 use serde_json::Value as JsonValue;
 use std::str::FromStr;
 use std::sync::Arc;
-use tracing::{debug, info};
+use tracing::info;
 
 use crate::client::OpcUaClient;
-use crate::utils::formatter::{format_node_id, format_variant, format_status_code};
+use crate::utils::formatter::{format_node_id, format_variant};
 use crate::utils::search::find_method_with_parent;
 
 pub async fn execute(
@@ -214,17 +214,21 @@ fn display_call_result(result: &CallMethodResult, verbose: bool) {
     if result.status_code.is_good() {
         println!("  {}: {}", "Status".bright_white(), "✅ Success".green().bold());
         
-        if !result.output_arguments.is_empty() {
-            println!("  {}: {} values", "Output".bright_white(), 
-                    result.output_arguments.len().to_string().bright_green());
-            
-            for (i, output) in result.output_arguments.iter().enumerate() {
-                let value_str = format_variant(output);
-                if verbose || value_str.len() <= 50 {
-                    println!("    [{}]: {}", i, value_str);
-                } else {
-                    println!("    [{}]: {}...", i, &value_str[..47]);
+        if let Some(ref output_args) = result.output_arguments {
+            if !output_args.is_empty() {
+                println!("  {}: {} values", "Output".bright_white(), 
+                        output_args.len().to_string().bright_green());
+                
+                for (i, output) in output_args.iter().enumerate() {
+                    let value_str = format_variant(output);
+                    if verbose || value_str.len() <= 50 {
+                        println!("    [{}]: {}", i, value_str);
+                    } else {
+                        println!("    [{}]: {}...", i, &value_str[..47]);
+                    }
                 }
+            } else {
+                println!("  {}: No return values", "Output".bright_white());
             }
         } else {
             println!("  {}: No return values", "Output".bright_white());
@@ -234,25 +238,19 @@ fn display_call_result(result: &CallMethodResult, verbose: bool) {
                 format!("❌ Failed ({})", result.status_code).red().bold());
         
         // Provide specific error guidance
-        match result.status_code.name() {
-            "BadMethodInvalid" => {
-                println!("\n💡 The method node ID is not valid or does not reference a method");
-            }
-            "BadArgumentsMissing" => {
-                println!("\n💡 Required arguments are missing. Use --args to provide input arguments");
-            }
-            "BadTooManyArguments" => {
-                println!("\n💡 Too many arguments provided. Check the method signature");
-            }
-            "BadInvalidArgument" => {
-                println!("\n💡 One or more arguments have invalid types or values");
-            }
-            "BadUserAccessDenied" => {
-                println!("\n💡 Access denied. You may need different authentication credentials");
-            }
-            _ => {
-                println!("\n💡 Check server logs and method requirements for more details");
-            }
+        let status_code_value = result.status_code.bits();
+        if status_code_value == 0x80750000 { // BadMethodInvalid
+            println!("\n💡 The method node ID is not valid or does not reference a method");
+        } else if status_code_value == 0x80760000 { // BadArgumentsMissing
+            println!("\n💡 Required arguments are missing. Use --args to provide input arguments");
+        } else if status_code_value == 0x807B0000 { // BadTooManyArguments
+            println!("\n💡 Too many arguments provided. Check the method signature");
+        } else if status_code_value == 0x80AB0000 { // BadInvalidArgument
+            println!("\n💡 One or more arguments have invalid types or values");
+        } else if status_code_value == 0x801F0000 { // BadUserAccessDenied
+            println!("\n💡 Access denied. You may need different authentication credentials");
+        } else {
+            println!("\n💡 Check server logs and method requirements for more details");
         }
     }
 }

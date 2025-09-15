@@ -3,7 +3,6 @@ use colored::*;
 use opcua::client::Session;
 use opcua::types::*;
 use std::str::FromStr;
-use std::sync::Arc;
 use tabled::{Table, Tabled};
 use tracing::{debug, info};
 
@@ -183,7 +182,17 @@ fn display_summary_results(results: &[NodeData]) {
                 .unwrap_or_else(|| "Unknown".to_string());
             let node_class_str = get_attribute_value(&data.read_results, 1)
                 .and_then(|s| s.parse::<u32>().ok())
-                .and_then(|val| NodeClass::from_u32(val))
+                .and_then(|val| match val {
+                    1 => Some(NodeClass::Object),
+                    2 => Some(NodeClass::Variable), 
+                    4 => Some(NodeClass::Method),
+                    8 => Some(NodeClass::ObjectType),
+                    16 => Some(NodeClass::VariableType),
+                    32 => Some(NodeClass::ReferenceType),
+                    64 => Some(NodeClass::DataType),
+                    128 => Some(NodeClass::View),
+                    _ => None,
+                })
                 .map(format_node_class)
                 .unwrap_or_else(|| "Unknown".to_string());
             let value = get_value_string(&data.read_results, data.all_attributes);
@@ -226,9 +235,19 @@ fn display_detailed_results(results: &[NodeData]) {
                     match attr_name {
                         &"NodeClass" => {
                             if let Variant::UInt32(val) = variant {
-                                NodeClass::from_u32(*val)
-                                    .map(format_node_class)
-                                    .unwrap_or_else(|| format!("Unknown ({})", val))
+                                match val {
+                                    1 => Some(NodeClass::Object),
+                                    2 => Some(NodeClass::Variable), 
+                                    4 => Some(NodeClass::Method),
+                                    8 => Some(NodeClass::ObjectType),
+                                    16 => Some(NodeClass::VariableType),
+                                    32 => Some(NodeClass::ReferenceType),
+                                    64 => Some(NodeClass::DataType),
+                                    128 => Some(NodeClass::View),
+                                    _ => None,
+                                }
+                                .map(format_node_class)
+                                .unwrap_or_else(|| format!("Unknown ({})", val))
                             } else {
                                 format_variant(variant)
                             }
@@ -249,7 +268,7 @@ fn display_detailed_results(results: &[NodeData]) {
                 table_data.push(DetailedNodeInfo {
                     attribute: attr_name.to_string(),
                     value: value_str,
-                    status: format_status_code(&data_value.status),
+                    status: data_value.status.as_ref().map_or("Unknown".to_string(), |s| format_status_code(s)),
                 });
             }
         }
@@ -279,10 +298,10 @@ fn get_value_string(results: &[DataValue], has_value_attr: bool) -> String {
 }
 
 fn get_status_string(results: &[DataValue]) -> String {
-    if results.iter().all(|dv| dv.status.is_good()) {
+    if results.iter().all(|dv| dv.status.as_ref().map_or(false, |s| s.is_good())) {
         "✅ All Good".green().to_string()
     } else {
-        let bad_count = results.iter().filter(|dv| !dv.status.is_good()).count();
+        let bad_count = results.iter().filter(|dv| !dv.status.as_ref().map_or(false, |s| s.is_good())).count();
         format!("⚠️  {} errors", bad_count).yellow().to_string()
     }
 }

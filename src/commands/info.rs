@@ -118,9 +118,9 @@ fn format_timestamp(timestamp: &Variant) -> String {
 }
 
 fn format_build_info(build_info: &Variant) -> String {
-    if let Variant::ExtensionObject(ext_obj) = build_info {
+    if let Variant::ExtensionObject(_ext_obj) = build_info {
         // Try to extract build info fields
-        format!("Build information available ({})", ext_obj.node_id)
+        format!("Build information available")
     } else {
         "Not available".dimmed().to_string()
     }

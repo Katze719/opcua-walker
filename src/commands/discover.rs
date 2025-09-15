@@ -1,5 +1,7 @@
 use anyhow::Result;
 use colored::*;
+use opcua::types::{MessageSecurityMode, UserTokenType, ApplicationType, UserTokenPolicy};
+use tabled::Tabled;
 
 use crate::client::OpcUaClient;
 
@@ -64,7 +66,6 @@ fn format_user_tokens(tokens: &[UserTokenPolicy]) -> String {
             UserTokenType::UserName => "Username".to_string(),
             UserTokenType::Certificate => "Certificate".to_string(),
             UserTokenType::IssuedToken => "IssuedToken".to_string(),
-            _ => "Unknown".to_string(),
         })
         .collect();
     
@@ -77,6 +78,5 @@ fn format_application_type(app_type: ApplicationType) -> String {
         ApplicationType::Client => "Client", 
         ApplicationType::ClientAndServer => "Client & Server",
         ApplicationType::DiscoveryServer => "Discovery Server",
-        _ => "Unknown",
     }.to_string()
 }

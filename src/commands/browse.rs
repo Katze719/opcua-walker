@@ -132,7 +132,7 @@ async fn browse_recursive(
                             // Recursively browse child nodes
                             if current_depth < max_depth {
                                 let child_node_id = &reference.node_id.node_id;
-                                if let Err(e) = browse_recursive(
+                                if let Err(e) = Box::pin(browse_recursive(
                                     session,
                                     child_node_id,
                                     current_depth + 1,
@@ -140,7 +140,7 @@ async fn browse_recursive(
                                     results,
                                     visited,
                                     verbose,
-                                ).await {
+                                )).await {
                                     if verbose {
                                         warn!("Failed to browse child node {}: {}", 
                                               format_node_id(child_node_id), e);
