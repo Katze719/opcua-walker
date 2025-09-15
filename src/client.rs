@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Result};
 use opcua::client::{ClientBuilder, IdentityToken, Session, Password};
 use opcua::types::{EndpointDescription, MessageSecurityMode, UserTokenPolicy, StatusCode};
+use opcua::crypto::SecurityPolicy;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::task::JoinHandle;
@@ -140,19 +141,67 @@ impl OpcUaClient {
             .client()
             .map_err(|e| anyhow!("Failed to create certificate client: {:?}", e))?;
 
-        // Try to connect with certificate authentication
-        // Create a basic endpoint description - the library will discover and choose the best endpoint
-        let endpoint: EndpointDescription = (
-            self.endpoint.as_str(),
-            "",
-            MessageSecurityMode::None,
-            UserTokenPolicy::anonymous()
-        ).into();
+        // First, discover available endpoints from the server
+        debug!("Discovering server endpoints...");
+        let endpoints = client
+            .get_server_endpoints()
+            .await
+            .map_err(|e| anyhow!("Failed to discover server endpoints: {:?}", e))?;
+
+        if self.verbose {
+            println!("🔍 Discovered {} endpoint(s)", endpoints.len());
+            for (i, ep) in endpoints.iter().enumerate() {
+                println!("  {}. {} / {} / {}", 
+                    i + 1,
+                    SecurityPolicy::from_uri(ep.security_policy_uri.as_ref()),
+                    ep.security_mode,
+                    ep.endpoint_url
+                );
+            }
+        }
+
+        // Find a suitable endpoint for certificate authentication
+        // Prefer stronger security policies first
+        let security_policies = [
+            SecurityPolicy::Aes256Sha256RsaPss,
+            SecurityPolicy::Aes128Sha256RsaOaep,
+            SecurityPolicy::Basic256Sha256,
+            SecurityPolicy::Basic256,
+            SecurityPolicy::Basic128Rsa15,
+        ];
+
+        let security_modes = [
+            MessageSecurityMode::SignAndEncrypt,
+            MessageSecurityMode::Sign,
+        ];
+
+        let mut chosen_endpoint = None;
+        
+        for policy in &security_policies {
+            for mode in &security_modes {
+                if let Some(endpoint) = endpoints.iter().find(|ep| {
+                    SecurityPolicy::from_uri(ep.security_policy_uri.as_ref()) == *policy
+                        && ep.security_mode == *mode
+                }) {
+                    if self.verbose {
+                        println!("🔐 Selecting endpoint: {} / {}", policy, mode);
+                    }
+                    chosen_endpoint = Some(endpoint.clone());
+                    break;
+                }
+            }
+            if chosen_endpoint.is_some() {
+                break;
+            }
+        }
+
+        let endpoint = chosen_endpoint
+            .ok_or_else(|| anyhow!("No suitable secure endpoint found for certificate authentication"))?;
 
         // Use anonymous identity token since the certificate is configured in the client
         let identity_token = IdentityToken::Anonymous;
 
-        // Try to connect - the library will automatically find a suitable secure endpoint
+        // Connect to the chosen endpoint
         let (session, event_loop) = client
             .connect_to_matching_endpoint(endpoint, identity_token)
             .await
