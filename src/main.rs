@@ -29,8 +29,8 @@ async fn main() -> Result<()> {
     // Execute the requested command
     let result = match &cli.command {
         Commands::Discover => commands::discover::execute(&mut client).await,
-        Commands::Browse { node, depth } => {
-            commands::browse::execute(&mut client, node.as_deref(), *depth).await
+        Commands::Browse { node, depth, compact, values } => {
+            commands::browse::execute(&mut client, node.as_deref(), *depth, *compact, *values).await
         }
         Commands::Read { node_ids, all_attributes, include_value, search } => {
             commands::read::execute(

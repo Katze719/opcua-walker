@@ -21,12 +21,28 @@ struct NodeInfo {
     node_class: String,
     #[tabled(rename = "Type")]
     type_definition: String,
+    #[tabled(rename = "Value")]
+    value: String,
+}
+
+#[derive(Tabled)]
+struct CompactNodeInfo {
+    #[tabled(rename = "ID")]
+    node_id: String,
+    #[tabled(rename = "Name")]
+    display_name: String,
+    #[tabled(rename = "Class")]
+    node_class: String,
+    #[tabled(rename = "Value")]
+    value: String,
 }
 
 pub async fn execute(
     client: &mut OpcUaClient,
     start_node: Option<&str>,
     max_depth: u32,
+    compact: bool,
+    read_values: bool,
 ) -> Result<()> {
     let session = client.session()?;
     
@@ -70,9 +86,32 @@ pub async fn execute(
         }
     });
     
-    let node_table: Vec<NodeInfo> = nodes
-        .into_iter()
-        .map(|node| NodeInfo {
+    // Read values if requested
+    if compact {
+        display_compact_table(session, &nodes, read_values).await?;
+    } else {
+        display_full_table(session, &nodes, read_values).await?;
+    }
+    
+    println!("\n✅ {}", "Browse completed successfully".green());
+    Ok(())
+}
+
+async fn display_full_table(
+    session: &Arc<Session>,
+    nodes: &[ReferenceDescription],
+    read_values: bool,
+) -> Result<()> {
+    let mut node_table = Vec::new();
+    
+    for node in nodes {
+        let value = if read_values && node.node_class == NodeClass::Variable {
+            read_node_value(session, &node.node_id.node_id).await
+        } else {
+            "—".dimmed().to_string()
+        };
+        
+        node_table.push(NodeInfo {
             node_id: format_node_id(&node.node_id.node_id),
             display_name: truncate_string(&node.display_name.to_string(), 30),
             node_class: format_node_class(node.node_class),
@@ -81,15 +120,81 @@ pub async fn execute(
             } else {
                 None
             }.unwrap_or_else(|| "—".dimmed().to_string()),
-        })
-        .collect();
+            value,
+        });
+    }
     
     println!("\n📋 {} nodes discovered", node_table.len().to_string().bright_green());
     let table = Table::new(node_table);
     println!("{}", table);
-    
-    println!("\n✅ {}", "Browse completed successfully".green());
     Ok(())
+}
+
+async fn display_compact_table(
+    session: &Arc<Session>,
+    nodes: &[ReferenceDescription],
+    read_values: bool,
+) -> Result<()> {
+    let mut node_table = Vec::new();
+    
+    for node in nodes {
+        let value = if read_values && node.node_class == NodeClass::Variable {
+            read_node_value(session, &node.node_id.node_id).await
+        } else {
+            "—".dimmed().to_string()
+        };
+        
+        node_table.push(CompactNodeInfo {
+            node_id: format_node_id(&node.node_id.node_id),
+            display_name: truncate_string(&node.display_name.to_string(), 20),
+            node_class: format_compact_node_class(node.node_class),
+            value,
+        });
+    }
+    
+    println!("\n📋 {} nodes", node_table.len().to_string().bright_green());
+    let table = Table::new(node_table);
+    println!("{}", table);
+    Ok(())
+}
+
+async fn read_node_value(session: &Arc<Session>, node_id: &NodeId) -> String {
+    match session.read(&[ReadValueId::from(node_id)], TimestampsToReturn::Both, 0.0).await {
+        Ok(data_values) => {
+            if let Some(data_value) = data_values.first() {
+                if let Some(status) = &data_value.status {
+                    if status.is_good() {
+                        if let Some(value) = &data_value.value {
+                            truncate_string(&format!("{}", value), 20)
+                        } else {
+                            "null".dimmed().to_string()
+                        }
+                    } else {
+                        format!("Error: {}", status).red().to_string()
+                    }
+                } else {
+                    "No status".dimmed().to_string()
+                }
+            } else {
+                "No data".dimmed().to_string()
+            }
+        }
+        Err(e) => format!("Read error: {}", e).red().to_string(),
+    }
+}
+
+fn format_compact_node_class(node_class: NodeClass) -> String {
+    match node_class {
+        NodeClass::Object => "Obj".blue().to_string(),
+        NodeClass::Variable => "Var".green().to_string(),
+        NodeClass::Method => "Met".yellow().to_string(),
+        NodeClass::ObjectType => "OTyp".cyan().to_string(),
+        NodeClass::VariableType => "VTyp".magenta().to_string(),
+        NodeClass::ReferenceType => "Ref".white().to_string(),
+        NodeClass::DataType => "Data".bright_white().to_string(),
+        NodeClass::View => "View".bright_blue().to_string(),
+        _ => "?".dimmed().to_string(),
+    }
 }
 
 async fn browse_recursive(

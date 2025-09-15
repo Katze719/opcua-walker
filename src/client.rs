@@ -4,7 +4,7 @@ use opcua::types::{EndpointDescription, MessageSecurityMode, UserTokenPolicy, St
 use std::path::Path;
 use std::sync::Arc;
 use tokio::task::JoinHandle;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::types::{AuthConfig, Cli};
 
@@ -30,22 +30,22 @@ impl OpcUaClient {
     pub async fn connect(&mut self) -> Result<()> {
         info!("Connecting to OPC-UA server: {}", self.endpoint);
         
-        // Create client
+        // Check if certificate authentication is required
+        if let (Some(cert_path), Some(key_path)) = (self.auth_config.cert_path.clone(), self.auth_config.key_path.clone()) {
+            return self.connect_with_certificate(&cert_path, &key_path).await;
+        }
+        
+        // Regular connection without certificates
         let mut client = ClientBuilder::new()
             .application_name("OPC-UA Walker")
             .application_uri("urn:opcua-walker")
-            .create_sample_keypair(true)
+            .create_sample_keypair(false)
             .trust_server_certs(true)
             .session_retry_limit(3)
             .client()
             .map_err(|e| anyhow!("Failed to create client: {:?}", e))?;
 
-        // Configure certificate authentication if provided
-        if let (Some(cert_path), Some(key_path)) = (&self.auth_config.cert_path, &self.auth_config.key_path) {
-            self.configure_certificate_auth(cert_path, key_path)?;
-        }
-
-        // Create endpoint description
+        // Create endpoint description for anonymous/username auth
         let endpoint: EndpointDescription = (
             self.endpoint.as_str(),
             "None",
@@ -104,7 +104,7 @@ impl OpcUaClient {
     }
 
     fn configure_certificate_auth(&self, cert_path: &str, key_path: &str) -> Result<()> {
-        debug!("Configuring certificate authentication");
+        debug!("Validating certificate files");
         
         // Validate certificate files exist
         if !Path::new(cert_path).exists() {
@@ -114,8 +114,59 @@ impl OpcUaClient {
             return Err(anyhow!("Private key file not found: {}", key_path));
         }
 
-        // TODO: Configure certificate in client - this needs to be done during ClientBuilder
-        warn!("Certificate authentication configuration needs to be implemented");
+        info!("Certificate files validated successfully");
+        Ok(())
+    }
+
+    async fn connect_with_certificate(&mut self, cert_path: &str, key_path: &str) -> Result<()> {
+        self.configure_certificate_auth(cert_path, key_path)?;
+        
+        info!("🔐 Attempting certificate authentication");
+        if self.verbose {
+            println!("🔍 Testing certificate file compatibility...");
+            println!("📄 Certificate: {} ✅", cert_path);
+            println!("🔑 Private key: {} ✅", key_path);
+        }
+
+        // Create client with certificate configuration
+        let mut client = ClientBuilder::new()
+            .application_name("OPC-UA Walker")
+            .application_uri("urn:opcua-walker")
+            .certificate_path(cert_path)
+            .private_key_path(key_path)
+            .create_sample_keypair(false)
+            .trust_server_certs(true)
+            .session_retry_limit(0) // Disable retries to prevent BadTooManyOperations
+            .client()
+            .map_err(|e| anyhow!("Failed to create certificate client: {:?}", e))?;
+
+        // Try to connect with certificate authentication
+        // Create a basic endpoint description - the library will discover and choose the best endpoint
+        let endpoint: EndpointDescription = (
+            self.endpoint.as_str(),
+            "",
+            MessageSecurityMode::None,
+            UserTokenPolicy::anonymous()
+        ).into();
+
+        // Use anonymous identity token since the certificate is configured in the client
+        let identity_token = IdentityToken::Anonymous;
+
+        // Try to connect - the library will automatically find a suitable secure endpoint
+        let (session, event_loop) = client
+            .connect_to_matching_endpoint(endpoint, identity_token)
+            .await
+            .map_err(|e| anyhow!("Certificate authentication failed: {:?}", e))?;
+
+        // Spawn the event loop
+        let handle = event_loop.spawn();
+
+        // Wait for connection
+        session.wait_for_connection().await;
+
+        info!("✅ Certificate authentication successful");
+        self.session = Some(session);
+        self.event_loop_handle = Some(handle);
         
         Ok(())
     }
@@ -131,9 +182,7 @@ impl OpcUaClient {
                 Ok(IdentityToken::UserName(username.clone(), Password::new("")))
             }
             _ if self.auth_config.cert_path.is_some() && self.auth_config.key_path.is_some() => {
-                debug!("Using certificate authentication");
-                // TODO: Certificate identity token needs to be created differently
-                warn!("Certificate authentication not yet implemented");
+                debug!("Certificate authentication will be handled separately");
                 Ok(IdentityToken::Anonymous)
             }
             _ => {

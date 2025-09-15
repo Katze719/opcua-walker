@@ -47,6 +47,14 @@ pub enum Commands {
         /// Maximum depth for recursive browsing
         #[arg(short, long, default_value = "3")]
         depth: u32,
+
+        /// Use compact view for output (less verbose table)
+        #[arg(short, long)]
+        compact: bool,
+
+        /// Read and display values for all Variable nodes
+        #[arg(short = 'V', long)]
+        values: bool,
     },
     
     /// Read node information and attributes
