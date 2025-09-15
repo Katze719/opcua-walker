@@ -69,6 +69,25 @@ pub async fn execute(
         }
     }
     
+    // Check if method is executable before attempting call
+    if verbose {
+        match check_method_executable(session, &method_node_id).await {
+            Ok(executable) => {
+                if executable {
+                    println!("🔍 Method executable attribute: ✅ {}", "True".green());
+                } else {
+                    println!("🔍 Method executable attribute: ❌ {}", "False".red());
+                    println!("⚠️  {}", "Warning: Method may not be callable".bright_yellow());
+                }
+            }
+            Err(_) => {
+                if verbose {
+                    println!("🔍 Could not check executable attribute (proceeding anyway)");
+                }
+            }
+        }
+    }
+
     // Execute the method call
     println!("\n⚡ Executing method call...");
     
@@ -103,6 +122,40 @@ pub async fn execute(
     }
     
     Ok(())
+}
+
+async fn check_method_executable(session: &Arc<Session>, method_node_id: &NodeId) -> Result<bool> {
+    // Read the Executable attribute (AttributeId = 23)
+    let read_request = ReadValueId {
+        node_id: method_node_id.clone(),
+        attribute_id: AttributeId::Executable as u32,
+        ..Default::default()
+    };
+    
+    match session.read(&[read_request], TimestampsToReturn::Neither, 0.0).await {
+        Ok(read_results) => {
+            if let Some(read_result) = read_results.first() {
+                // Check if status is good (if present) or assume good if no status
+                let status_good = read_result.status
+                    .as_ref()
+                    .map_or(true, |status| status.is_good());
+                
+                if status_good {
+                    if let Some(ref value) = read_result.value {
+                        if let Variant::Boolean(executable) = value {
+                            return Ok(*executable);
+                        }
+                    }
+                }
+            }
+            // Default to true if we can't read the attribute
+            Ok(true)
+        }
+        Err(_) => {
+            // If we can't read the attribute, assume it's executable
+            Ok(true)
+        }
+    }
 }
 
 async fn find_parent_object(session: &Arc<Session>, method_node_id: &NodeId) -> Result<NodeId> {
@@ -249,6 +302,15 @@ fn display_call_result(result: &CallMethodResult, verbose: bool) {
             println!("\n💡 One or more arguments have invalid types or values");
         } else if status_code_value == 0x801F0000 { // BadUserAccessDenied
             println!("\n💡 Access denied. You may need different authentication credentials");
+        } else if status_code_value == 0x81110000 { // BadNotExecutable
+            println!("\n💡 {}", "The method is not currently executable".bright_yellow());
+            println!("   • The method's Executable attribute is set to false");
+            println!("   • This may be due to:");
+            println!("     - Server state (e.g., not ready, maintenance mode)");
+            println!("     - Method preconditions not met");
+            println!("     - Insufficient user permissions");
+            println!("     - Method temporarily disabled by configuration");
+            println!("   • Try again later or contact server administrator");
         } else {
             println!("\n💡 Check server logs and method requirements for more details");
         }
