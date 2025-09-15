@@ -3,6 +3,7 @@ use colored::*;
 use opcua::client::Session;
 use opcua::types::*;
 use std::collections::HashSet;
+use std::str::FromStr;
 use std::sync::Arc;
 use tabled::{Table, Tabled};
 use tracing::{debug, warn};
@@ -117,31 +118,33 @@ async fn browse_recursive(
         reference_type_id: ReferenceTypeId::HierarchicalReferences.into(),
         include_subtypes: true,
         node_class_mask: 0u32, // All node classes
-        result_mask: BrowseResultMask::All,
+        result_mask: BrowseResultMask::All as u32,
     };
     
     match session.browse(&[browse_request], 0, None).await {
         Ok(browse_results) => {
             if let Some(browse_result) = browse_results.first() {
                 if browse_result.status_code.is_good() {
-                    for reference in &browse_result.references {
-                        results.push(reference.clone());
-                        
-                        // Recursively browse child nodes
-                        if current_depth < max_depth {
-                            let child_node_id = &reference.node_id.node_id;
-                            if let Err(e) = browse_recursive(
-                                session,
-                                child_node_id,
-                                current_depth + 1,
-                                max_depth,
-                                results,
-                                visited,
-                                verbose,
-                            ).await {
-                                if verbose {
-                                    warn!("Failed to browse child node {}: {}", 
-                                          format_node_id(child_node_id), e);
+                    if let Some(references) = &browse_result.references {
+                        for reference in references {
+                            results.push(reference.clone());
+                            
+                            // Recursively browse child nodes
+                            if current_depth < max_depth {
+                                let child_node_id = &reference.node_id.node_id;
+                                if let Err(e) = browse_recursive(
+                                    session,
+                                    child_node_id,
+                                    current_depth + 1,
+                                    max_depth,
+                                    results,
+                                    visited,
+                                    verbose,
+                                ).await {
+                                    if verbose {
+                                        warn!("Failed to browse child node {}: {}", 
+                                              format_node_id(child_node_id), e);
+                                    }
                                 }
                             }
                         }

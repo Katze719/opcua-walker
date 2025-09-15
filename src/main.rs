@@ -1,7 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
-use colored::*;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 mod client;
 mod commands;

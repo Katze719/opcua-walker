@@ -1,10 +1,9 @@
 use anyhow::{anyhow, Result};
-use opcua::client::{ClientBuilder, IdentityToken, Session};
-use opcua::types::{EndpointDescription, MessageSecurityMode, UserTokenPolicy};
+use opcua::client::{ClientBuilder, IdentityToken, Session, Password};
+use opcua::types::{EndpointDescription, MessageSecurityMode, UserTokenPolicy, StatusCode};
 use std::path::Path;
 use std::sync::Arc;
 use tokio::task::JoinHandle;
-use opcua::types::StatusCode;
 use tracing::{debug, info, warn};
 
 use crate::types::{AuthConfig, Cli};
@@ -100,6 +99,10 @@ impl OpcUaClient {
         self.verbose
     }
 
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+
     fn configure_certificate_auth(&self, cert_path: &str, key_path: &str) -> Result<()> {
         debug!("Configuring certificate authentication");
         
@@ -121,11 +124,11 @@ impl OpcUaClient {
         match (&self.auth_config.username, &self.auth_config.password) {
             (Some(username), Some(password)) => {
                 debug!("Using username/password authentication");
-                Ok(IdentityToken::UserName(username.clone(), password.clone()))
+                Ok(IdentityToken::UserName(username.clone(), Password::new(password)))
             }
             (Some(username), None) => {
                 debug!("Using username authentication (no password)");
-                Ok(IdentityToken::UserName(username.clone(), String::new()))
+                Ok(IdentityToken::UserName(username.clone(), Password::new("")))
             }
             _ if self.auth_config.cert_path.is_some() && self.auth_config.key_path.is_some() => {
                 debug!("Using certificate authentication");

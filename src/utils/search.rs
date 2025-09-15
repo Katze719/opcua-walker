@@ -43,7 +43,7 @@ pub async fn search_nodes_by_name(
     let mut queue = VecDeque::new();
     
     // Start from multiple root nodes for comprehensive search
-    let start_nodes = vec![
+    let start_nodes: Vec<NodeId> = vec![
         ObjectId::ObjectsFolder.into(),
         ObjectId::Server.into(),
         ObjectId::TypesFolder.into(),
@@ -151,14 +151,14 @@ async fn browse_node(session: &Arc<Session>, node_id: &NodeId) -> Result<Vec<Ref
         reference_type_id: ReferenceTypeId::HierarchicalReferences.into(),
         include_subtypes: true,
         node_class_mask: 0u32, // All node classes
-        result_mask: BrowseResultMask::All,
+        result_mask: BrowseResultMask::All as u32,
     };
     
     let browse_results = session.browse(&[browse_request], 0, None).await?;
     
     if let Some(browse_result) = browse_results.first() {
         if browse_result.status_code.is_good() {
-            Ok(browse_result.references.clone())
+            Ok(browse_result.references.clone().unwrap_or_default())
         } else {
             Ok(Vec::new())
         }

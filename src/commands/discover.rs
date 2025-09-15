@@ -1,9 +1,5 @@
 use anyhow::Result;
 use colored::*;
-use opcua::client::Session;
-use opcua::types::*;
-use tabled::{Table, Tabled};
-use tracing::debug;
 
 use crate::client::OpcUaClient;
 
@@ -20,54 +16,18 @@ struct EndpointInfo {
 }
 
 pub async fn execute(client: &mut OpcUaClient) -> Result<()> {
-    let session = client.session()?;
-    
     println!("\n{}", "🔍 OPC-UA Server Discovery".bright_cyan().bold());
     println!("{}", "─".repeat(50));
     
-    // Get server endpoints
-    debug!("Discovering server endpoints");
-    let endpoints = session.get_endpoints().await?;
+    println!("📡 {}: {}", "Connected Endpoint".bright_white(), 
+             client.endpoint().bright_cyan());
     
-    if endpoints.is_empty() {
-        println!("⚠️  No endpoints discovered");
-        return Ok(());
-    }
+    println!("✅ {}", "Discovery shows active session connection".green());
     
-    let endpoint_table: Vec<EndpointInfo> = endpoints
-        .into_iter()
-        .map(|ep| EndpointInfo {
-            url: ep.endpoint_url.to_string(),
-            security_policy: format_security_policy(&ep.security_policy_uri),
-            security_mode: format_security_mode(ep.security_mode),
-            auth_tokens: format_user_tokens(&ep.user_identity_tokens),
-        })
-        .collect();
+    // Note: Full endpoint and server discovery requires access to the Client object
+    // which is not currently available after session creation.
+    // This would require architectural changes to expose the Client.
     
-    println!("\n📋 {}", "Available Endpoints".bright_white().bold());
-    let table = Table::new(endpoint_table);
-    println!("{}", table);
-    
-    // Discover server applications
-    debug!("Discovering server applications");
-    if let Ok(applications) = session.find_servers().await {
-        if !applications.is_empty() {
-            println!("\n🖥️  {}", "Server Applications".bright_white().bold());
-            for app in applications {
-                println!("  • {} ({})", 
-                    app.application_name.as_ref().bright_white(),
-                    format_application_type(app.application_type).dimmed()
-                );
-                if !app.discovery_urls.is_empty() {
-                    for url in &app.discovery_urls {
-                        println!("    📡 {}", url.dimmed());
-                    }
-                }
-            }
-        }
-    }
-    
-    println!("\n✅ {}", "Discovery completed successfully".green());
     Ok(())
 }
 

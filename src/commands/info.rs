@@ -1,6 +1,5 @@
 use anyhow::Result;
 use colored::*;
-use opcua::client::Session;
 use opcua::types::*;
 use tracing::debug;
 
@@ -13,44 +12,77 @@ pub async fn execute(client: &mut OpcUaClient) -> Result<()> {
     println!("{}", "─".repeat(40));
     
     // Get server status
-    let server_status = session
-        .read(&ReadValueId::from(VariableId::Server_ServerStatus))
+    let server_status_request = ReadValueId {
+        node_id: VariableId::Server_ServerStatus.into(),
+        attribute_id: AttributeId::Value as u32,
+        index_range: NumericRange::None,
+        data_encoding: QualifiedName::null(),
+    };
+    let server_status_results = session
+        .read(&[server_status_request], TimestampsToReturn::Neither, 0.0)
         .await?;
+    let server_status = server_status_results.first();
         
-    println!("📊 {}: {}", "Server Status".bright_white(), 
-             format_server_status(&server_status));
+    if let Some(status_data) = server_status {
+        println!("📊 {}: {}", "Server Status".bright_white(), 
+                 format_server_status(status_data));
+    }
     
     // Get server timestamp
-    let current_time = session
-        .read(&ReadValueId::from(VariableId::Server_ServerStatus_CurrentTime))
+    let current_time_request = ReadValueId {
+        node_id: VariableId::Server_ServerStatus_CurrentTime.into(),
+        attribute_id: AttributeId::Value as u32,
+        index_range: NumericRange::None,
+        data_encoding: QualifiedName::null(),
+    };
+    let current_time_results = session
+        .read(&[current_time_request], TimestampsToReturn::Neither, 0.0)
         .await?;
         
-    if let Some(timestamp) = current_time.value {
-        println!("🕐 {}: {}", "Server Time".bright_white(), 
-                 format_timestamp(&timestamp));
+    if let Some(current_time) = current_time_results.first() {
+        if let Some(timestamp) = &current_time.value {
+            println!("🕐 {}: {}", "Server Time".bright_white(), 
+                     format_timestamp(timestamp));
+        }
     }
     
     // Get build info
-    let build_info = session
-        .read(&ReadValueId::from(VariableId::Server_ServerStatus_BuildInfo))
+    let build_info_request = ReadValueId {
+        node_id: VariableId::Server_ServerStatus_BuildInfo.into(),
+        attribute_id: AttributeId::Value as u32,
+        index_range: NumericRange::None,
+        data_encoding: QualifiedName::null(),
+    };
+    let build_info_results = session
+        .read(&[build_info_request], TimestampsToReturn::Neither, 0.0)
         .await?;
         
-    if let Some(build_info) = build_info.value {
-        println!("🏗️  {}: {}", "Build Info".bright_white(), 
-                 format_build_info(&build_info));
+    if let Some(build_info) = build_info_results.first() {
+        if let Some(build_info_value) = &build_info.value {
+            println!("🏗️  {}: {}", "Build Info".bright_white(), 
+                     format_build_info(build_info_value));
+        }
     }
     
     // Get namespace array
     debug!("Reading namespace array");
-    let namespaces = session
-        .read(&ReadValueId::from(VariableId::Server_NamespaceArray))
+    let namespaces_request = ReadValueId {
+        node_id: VariableId::Server_NamespaceArray.into(),
+        attribute_id: AttributeId::Value as u32,
+        index_range: NumericRange::None,
+        data_encoding: QualifiedName::null(),
+    };
+    let namespaces_results = session
+        .read(&[namespaces_request], TimestampsToReturn::Neither, 0.0)
         .await?;
         
-    if let Some(Variant::Array(ns_array)) = namespaces.value {
-        println!("\n📁 {}", "Available Namespaces".bright_cyan());
-        for (i, ns) in ns_array.values.iter().enumerate() {
-            if let Variant::String(ns_string) = ns {
-                println!("   ns={}: {}", i, ns_string.as_ref());
+    if let Some(namespaces) = namespaces_results.first() {
+        if let Some(Variant::Array(ns_array)) = &namespaces.value {
+            println!("\n📁 {}", "Available Namespaces".bright_cyan());
+            for (i, ns) in ns_array.values.iter().enumerate() {
+                if let Variant::String(ns_string) = ns {
+                    println!("   ns={}: {}", i, ns_string.as_ref());
+                }
             }
         }
     }

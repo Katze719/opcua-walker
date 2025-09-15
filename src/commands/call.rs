@@ -3,6 +3,7 @@ use colored::*;
 use opcua::client::Session;
 use opcua::types::*;
 use serde_json::Value as JsonValue;
+use std::str::FromStr;
 use std::sync::Arc;
 use tracing::{debug, info};
 
@@ -112,14 +113,18 @@ async fn find_parent_object(session: &Arc<Session>, method_node_id: &NodeId) -> 
         reference_type_id: ReferenceTypeId::HasComponent.into(),
         include_subtypes: true,
         node_class_mask: NodeClassMask::OBJECT.bits(),
-        result_mask: BrowseResultMask::All,
+        result_mask: BrowseResultMask::All as u32,
     };
     
     let browse_results = session.browse(&[browse_request], 0, None).await?;
     
     if let Some(browse_result) = browse_results.first() {
-        if browse_result.status_code.is_good() && !browse_result.references.is_empty() {
-            return Ok(browse_result.references[0].node_id.node_id.clone());
+        if browse_result.status_code.is_good() {
+            if let Some(references) = &browse_result.references {
+                if !references.is_empty() {
+                    return Ok(references[0].node_id.node_id.clone());
+                }
+            }
         }
     }
     

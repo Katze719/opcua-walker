@@ -2,6 +2,8 @@ use anyhow::{anyhow, Result};
 use colored::*;
 use opcua::client::Session;
 use opcua::types::*;
+use std::str::FromStr;
+use std::sync::Arc;
 use tabled::{Table, Tabled};
 use tracing::{debug, info};
 
@@ -152,13 +154,13 @@ async fn read_node_info(
         .into_iter()
         .map(|attr| ReadValueId {
             node_id: node_id.clone(),
-            attribute_id: attr,
-            index_range: UAString::null(),
+            attribute_id: attr as u32,
+            index_range: NumericRange::None,
             data_encoding: QualifiedName::null(),
         })
         .collect();
     
-    let read_results = session.read(&read_requests).await?;
+    let read_results = session.read(&read_requests, TimestampsToReturn::Neither, 0.0).await?;
     
     Ok(NodeData {
         node_id: node_id.clone(),
