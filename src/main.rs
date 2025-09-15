@@ -111,16 +111,16 @@ fn main() -> Result<()> {
         );
     }
 
-    // Configure client with more tolerant settings for various servers
+    // Configure client with conservative settings to avoid overwhelming servers
     let mut client = ClientBuilder::new()
         .application_name("OPC-UA Walker")
         .application_uri("urn:opcua-walker")
         .create_sample_keypair(true)
         .trust_server_certs(true)
-        .session_retry_limit(1)
-        .session_retry_interval(1000)
-        .max_message_size(0) // Use server default (no limit from client side)
-        .max_chunk_count(0)  // Use server default (no limit from client side) 
+        .session_retry_limit(0)          // Disable retries during handshake to reduce operations
+        .session_retry_interval(2000)    // Longer intervals if retries are needed
+        .max_message_size(0)             // Use server default (no limit from client side)
+        .max_chunk_count(0)              // Use server default (no limit from client side)
         .client()
         .ok_or_else(|| anyhow::anyhow!("Failed to create OPC-UA client"))?;
 
@@ -252,9 +252,17 @@ fn main() -> Result<()> {
             let mut last_error = None;
             let mut successful_session = None;
             
-            for (security_policy, message_mode) in &security_configs {
+            for (i, (security_policy, message_mode)) in security_configs.iter().enumerate() {
                 if cli.verbose {
                     println!("  🔐 Trying security policy: {} with mode: {:?}", security_policy.to_str(), message_mode);
+                }
+                
+                // Add delay between attempts to avoid overwhelming servers with rapid handshake attempts
+                if i > 0 {
+                    if cli.verbose {
+                        println!("  ⏱️  Waiting 1 second before next security policy attempt...");
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(1000));
                 }
                 
                 match client.connect_to_endpoint(
@@ -277,6 +285,17 @@ fn main() -> Result<()> {
                             println!("  ❌ Failed with {} / {:?}: {:?}", security_policy.to_str(), message_mode, err);
                         }
                         last_error = Some(err);
+                        
+                        // Check if this is a BadTooManyOperations error and handle it specially
+                        let error_str = format!("{:?}", err);
+                        if error_str.contains("BadTooManyOperations") {
+                            if cli.verbose {
+                                println!("  ⚠️  BadTooManyOperations detected - server is rejecting rapid connection attempts");
+                                println!("     Adding extra delay before next attempt...");
+                            }
+                            // Extra delay for servers that are sensitive to rapid operations
+                            std::thread::sleep(std::time::Duration::from_millis(2000));
+                        }
                     }
                 }
             }
@@ -317,10 +336,26 @@ fn main() -> Result<()> {
                             anyhow::anyhow!("Connection failed: Invalid certificate\n\n  🚨 BadCertificateInvalid: Certificate file is invalid or corrupted\n  💡 Possible causes:\n    • Certificate file is corrupted or in wrong format\n    • DER certificate should be binary format\n    • PEM certificate should contain valid certificate data\n  🔧 Try:\n    • Verify certificate file with: openssl x509 -in {} -text -noout\n    • For DER: openssl x509 -in {} -inform DER -text -noout\n    • Use --verbose for certificate validation details\n\nOriginal error: {:?}", cert_path, cert_path, final_error)
                         },
                         _ => {
-                            // Check for combined error status like the user reported
+                            // Check for BadTooManyOperations specifically during handshake
                             let error_str = format!("{:?}", final_error);
-                            if error_str.contains("BadUnexpectedError") && error_str.contains("BadTooManyOperations") && error_str.contains("BadLicenseNotAvailable") {
-                                anyhow::anyhow!("Connection failed: Combined certificate and server errors\n\n  🚨 Multiple Error Codes: BadUnexpectedError + BadTooManyOperations + BadLicenseNotAvailable\n  💡 This suggests:\n    • Certificate authentication is triggering server licensing issues\n    • Wrong security policy for certificate authentication was being used\n    • Server may have strict licensing that doesn't work with None security policy\n  🔧 Fixed:\n    • Now using proper security policies (Basic256Sha256, Basic256, Basic128Rsa15)\n    • Now using secure message modes (Sign, SignAndEncrypt) instead of None\n    • Try again - this should work now with proper certificate security\n\nOriginal error: {:?}", final_error)
+                            if error_str.contains("BadTooManyOperations") {
+                                anyhow::anyhow!("Connection failed: Too many operations during certificate handshake\n\n\
+                                🚨 BadTooManyOperations: Server is rejecting rapid certificate authentication attempts\n\
+                                💡 This suggests the server has strict limits on connection establishment operations\n\
+                                🔧 Possible solutions:\n\
+                                  • The tool now adds delays between security policy attempts (implemented)\n\
+                                  • Server may need connection rate limiting configuration adjusted\n\
+                                  • Contact server administrator about OPC-UA connection limits\n\
+                                  • Try using username/password authentication instead:\n\
+                                    opcua-walker --username <user> --password <pass> call \"Reboot\"\n\
+                                  • Some servers limit certificate handshake operations per time period\n\
+                                🔍 Technical details:\n\
+                                  • The client tries multiple security policies during certificate authentication\n\
+                                  • Each attempt involves cryptographic handshake operations\n\
+                                  • Your server appears to limit these operations aggressively\n\
+                                \nOriginal error: {:?}", final_error)
+                            } else if error_str.contains("BadUnexpectedError") && error_str.contains("BadTooManyOperations") && error_str.contains("BadLicenseNotAvailable") {
+                                anyhow::anyhow!("Connection failed: Combined certificate and server errors\n\n  🚨 Multiple Error Codes: BadUnexpectedError + BadTooManyOperations + BadLicenseNotAvailable\n  💡 This suggests:\n    • Certificate authentication is triggering server licensing issues\n    • Server has strict operation limits during handshake (BadTooManyOperations)\n    • Server licensing may not support certificate authentication\n  🔧 Solutions:\n    • Added delays between security policy attempts (implemented)\n    • Try username/password authentication instead:\n      opcua-walker --username <user> --password <pass> call \"Reboot\"\n    • Contact server administrator about licensing and connection limits\n    • This combination suggests server-side configuration issues\n\nOriginal error: {:?}", final_error)
                             } else {
                                 anyhow::anyhow!("Connection failed: Tried all standard security policies\n\n  🚨 Certificate authentication failed with all security configurations\n  💡 Tried security policies:\n    • Basic256Sha256 (with Sign & SignAndEncrypt)\n    • Basic256 (with Sign & SignAndEncrypt)\n    • Basic128Rsa15 (with Sign & SignAndEncrypt)\n  🔧 Your server may require specific security settings or certificate configuration\n  📋 Check server documentation for supported security policies\n\nOriginal error: {:?}", final_error)
                             }
