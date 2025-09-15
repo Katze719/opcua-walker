@@ -8,7 +8,7 @@ use std::sync::Arc;
 use tracing::{debug, warn};
 
 use crate::client::OpcUaClient;
-use crate::utils::formatter::{format_node_id, format_node_class, truncate_string};
+use crate::utils::formatter::{format_node_id, format_node_class, format_variant, format_status_code, truncate_string};
 
 #[derive(Clone)]
 struct TreeNode {
@@ -232,18 +232,20 @@ async fn read_node_value(session: &Arc<Session>, node_id: &NodeId) -> Result<Str
     match session.read(&[ReadValueId::from(node_id)], TimestampsToReturn::Both, 0.0).await {
         Ok(data_values) => {
             if let Some(data_value) = data_values.first() {
-                if let Some(status) = &data_value.status {
-                    if status.is_good() {
-                        if let Some(value) = &data_value.value {
-                            Ok(truncate_string(&format!("{}", value), 20))
-                        } else {
-                            Ok("null".dimmed().to_string())
-                        }
+                // Check status first - status should always be present in OPC-UA DataValue
+                let status = data_value.status.as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("DataValue missing status field"))?;
+                
+                if status.is_good() {
+                    // Status is good, check for value
+                    if let Some(value) = &data_value.value {
+                        Ok(truncate_string(&format_variant(value), 20))
                     } else {
-                        Ok(format!("Error: {}", status).red().to_string())
+                        Ok("null".dimmed().to_string())
                     }
                 } else {
-                    Ok("No status".dimmed().to_string())
+                    // Status indicates an error or uncertain state
+                    Ok(format!("{}", format_status_code(status)))
                 }
             } else {
                 Ok("No data".dimmed().to_string())
