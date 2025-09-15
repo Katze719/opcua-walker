@@ -119,6 +119,8 @@ fn main() -> Result<()> {
         .trust_server_certs(true)
         .session_retry_limit(1)
         .session_retry_interval(1000)
+        .max_message_size(0) // Use server default (no limit from client side)
+        .max_chunk_count(0)  // Use server default (no limit from client side) 
         .client()
         .ok_or_else(|| anyhow::anyhow!("Failed to create OPC-UA client"))?;
 
@@ -246,6 +248,7 @@ fn main() -> Result<()> {
                 (SecurityPolicy::Basic128Rsa15, MessageSecurityMode::Sign),
             ];
 
+
             let mut last_error = None;
             let mut successful_session = None;
             
@@ -283,6 +286,26 @@ fn main() -> Result<()> {
                 None => {
                     // If all security policies failed, return detailed error
                     let final_error = last_error.unwrap_or(opcua::types::StatusCode::BadSecurityPolicyRejected);
+                    
+                    // Handle specific error cases
+                    if final_error.bits() & opcua::types::StatusCode::BadTcpMessageTooLarge.bits() != 0 {
+                        return Err(anyhow::anyhow!(
+                            "Connection failed: Message size exceeded server limits\n\n\
+                            🚨 BadTcpMessageTooLarge: Certificate handshake messages too large for server\n\
+                            💡 Possible solutions:\n\
+                              • Server has restrictive message size limits\n\
+                              • Certificate files may be too large for server configuration\n\
+                              • Try smaller certificate files or contact server administrator\n\
+                              • Server may need message size limits increased\n\
+                            🔧 Try:\n\
+                              • Use smaller certificate files\n\
+                              • Check server configuration for max message size\n\
+                              • Contact server administrator to increase limits\n\
+                              • Verify certificate files: openssl x509 -in {} -text -noout\n\n\
+                            Original error: {:?}", cert_path, final_error
+                        ));
+                    }
+                    
                     return Err(match final_error {
                         opcua::types::StatusCode::BadLicenseNotAvailable => {
                             anyhow::anyhow!("Connection failed: Server licensing issue\n\n  🚨 BadLicenseNotAvailable: The OPC-UA server reports it doesn't have a proper license\n  💡 This is NOT a certificate issue - it's a server-side licensing problem\n  📋 Contact the server administrator to resolve licensing\n  🔧 Your certificate files appear to be processed correctly\n\nOriginal error: {:?}", final_error)
