@@ -239,7 +239,14 @@ fn main() -> Result<()> {
 
             // Try different security policy combinations for certificate authentication
             // Certificate authentication requires secure channels, not None policy
+            // Now includes newer policies that support sha256WithRSAEncryption signature algorithm
             let security_configs = [
+                // Newer AES-based policies that support SHA-256 with RSA encryption
+                (SecurityPolicy::Aes256Sha256RsaPss, MessageSecurityMode::SignAndEncrypt),
+                (SecurityPolicy::Aes256Sha256RsaPss, MessageSecurityMode::Sign),
+                (SecurityPolicy::Aes128Sha256RsaOaep, MessageSecurityMode::SignAndEncrypt),
+                (SecurityPolicy::Aes128Sha256RsaOaep, MessageSecurityMode::Sign),
+                // Standard Basic policies
                 (SecurityPolicy::Basic256Sha256, MessageSecurityMode::SignAndEncrypt),
                 (SecurityPolicy::Basic256Sha256, MessageSecurityMode::Sign),
                 (SecurityPolicy::Basic256, MessageSecurityMode::SignAndEncrypt),
@@ -357,7 +364,7 @@ fn main() -> Result<()> {
                             } else if error_str.contains("BadUnexpectedError") && error_str.contains("BadTooManyOperations") && error_str.contains("BadLicenseNotAvailable") {
                                 anyhow::anyhow!("Connection failed: Combined certificate and server errors\n\n  🚨 Multiple Error Codes: BadUnexpectedError + BadTooManyOperations + BadLicenseNotAvailable\n  💡 This suggests:\n    • Certificate authentication is triggering server licensing issues\n    • Server has strict operation limits during handshake (BadTooManyOperations)\n    • Server licensing may not support certificate authentication\n  🔧 Solutions:\n    • Added delays between security policy attempts (implemented)\n    • Try username/password authentication instead:\n      opcua-walker --username <user> --password <pass> call \"Reboot\"\n    • Contact server administrator about licensing and connection limits\n    • This combination suggests server-side configuration issues\n\nOriginal error: {:?}", final_error)
                             } else {
-                                anyhow::anyhow!("Connection failed: Tried all standard security policies\n\n  🚨 Certificate authentication failed with all security configurations\n  💡 Tried security policies:\n    • Basic256Sha256 (with Sign & SignAndEncrypt)\n    • Basic256 (with Sign & SignAndEncrypt)\n    • Basic128Rsa15 (with Sign & SignAndEncrypt)\n  🔧 Your server may require specific security settings or certificate configuration\n  📋 Check server documentation for supported security policies\n\nOriginal error: {:?}", final_error)
+                                anyhow::anyhow!("Connection failed: Tried all standard security policies\n\n  🚨 Certificate authentication failed with all security configurations\n  💡 Tried security policies:\n    • Aes256Sha256RsaPss (with Sign & SignAndEncrypt) - supports sha256WithRSAEncryption\n    • Aes128Sha256RsaOaep (with Sign & SignAndEncrypt) - supports sha256WithRSAEncryption\n    • Basic256Sha256 (with Sign & SignAndEncrypt)\n    • Basic256 (with Sign & SignAndEncrypt)\n    • Basic128Rsa15 (with Sign & SignAndEncrypt)\n  🔧 Your server may require specific security settings or certificate configuration\n  📋 Check server documentation for supported security policies\n\nOriginal error: {:?}", final_error)
                             }
                         }
                     });
