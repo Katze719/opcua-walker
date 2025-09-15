@@ -268,7 +268,9 @@ fn display_detailed_results(results: &[NodeData]) {
                 table_data.push(DetailedNodeInfo {
                     attribute: attr_name.to_string(),
                     value: value_str,
-                    status: data_value.status.as_ref().map_or("Unknown".to_string(), |s| format_status_code(s)),
+                    status: data_value.status.as_ref()
+                        .map(|s| format_status_code(s))
+                        .unwrap_or_else(|| "✅ Good".green().to_string()),
                 });
             }
         }
@@ -298,10 +300,10 @@ fn get_value_string(results: &[DataValue], has_value_attr: bool) -> String {
 }
 
 fn get_status_string(results: &[DataValue]) -> String {
-    if results.iter().all(|dv| dv.status.as_ref().map_or(false, |s| s.is_good())) {
+    if results.iter().all(|dv| dv.status.as_ref().map_or(true, |s| s.is_good())) {
         "✅ All Good".green().to_string()
     } else {
-        let bad_count = results.iter().filter(|dv| !dv.status.as_ref().map_or(false, |s| s.is_good())).count();
+        let bad_count = results.iter().filter(|dv| !dv.status.as_ref().map_or(true, |s| s.is_good())).count();
         format!("⚠️  {} errors", bad_count).yellow().to_string()
     }
 }

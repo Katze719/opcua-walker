@@ -232,9 +232,10 @@ async fn read_node_value(session: &Arc<Session>, node_id: &NodeId) -> Result<Str
     match session.read(&[ReadValueId::from(node_id)], TimestampsToReturn::Both, 0.0).await {
         Ok(data_values) => {
             if let Some(data_value) = data_values.first() {
-                // Check status first - status should always be present in OPC-UA DataValue
+                // Handle status - None means Good status (OPC-UA uses encoding masks to omit default values)
                 let status = data_value.status.as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("DataValue missing status field"))?;
+                    .map(|s| s.clone())
+                    .unwrap_or_else(|| StatusCode::Good);
                 
                 if status.is_good() {
                     // Status is good, check for value
@@ -245,7 +246,7 @@ async fn read_node_value(session: &Arc<Session>, node_id: &NodeId) -> Result<Str
                     }
                 } else {
                     // Status indicates an error or uncertain state
-                    Ok(format!("{}", format_status_code(status)))
+                    Ok(format!("{}", format_status_code(&status)))
                 }
             } else {
                 Ok("No data".dimmed().to_string())
