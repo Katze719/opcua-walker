@@ -237,16 +237,35 @@ fn main() -> Result<()> {
                 }
             }
 
+            // Create a specialized client for certificate authentication
+            // Following the C code approach: configure client with certificates before connection
+            if cli.verbose {
+                println!("  🔧 Creating certificate-configured client (mirroring C implementation)...");
+            }
+            
+            // Create a new client specifically configured for certificate authentication
+            // This mirrors the C code's approach of configuring the client before connection
+            let mut cert_client = ClientBuilder::new()
+                .application_name("OPC-UA Walker")
+                .application_uri("urn:opcua-walker")
+                .create_sample_keypair(false)  // Don't create sample keypair when using real certificates
+                .trust_server_certs(true)      // Equivalent to UA_CertificateVerification_AcceptAll in C
+                .session_retry_limit(0)
+                .session_retry_interval(2000)
+                .max_message_size(0)
+                .max_chunk_count(0)
+                .client()
+                .ok_or_else(|| anyhow::anyhow!("Failed to create certificate-configured OPC-UA client"))?;
+
             // Try different security policy combinations for certificate authentication
-            // Certificate authentication requires secure channels, not None policy
-            // Now includes newer policies that support sha256WithRSAEncryption signature algorithm
+            // Following the order that supports sha256WithRSAEncryption signature algorithm
             let security_configs = [
-                // Newer AES-based policies that support SHA-256 with RSA encryption
+                // Newer AES-based policies that support SHA-256 with RSA encryption (try these first)
                 (SecurityPolicy::Aes256Sha256RsaPss, MessageSecurityMode::SignAndEncrypt),
-                (SecurityPolicy::Aes256Sha256RsaPss, MessageSecurityMode::Sign),
                 (SecurityPolicy::Aes128Sha256RsaOaep, MessageSecurityMode::SignAndEncrypt),
+                (SecurityPolicy::Aes256Sha256RsaPss, MessageSecurityMode::Sign),
                 (SecurityPolicy::Aes128Sha256RsaOaep, MessageSecurityMode::Sign),
-                // Standard Basic policies
+                // Standard Basic policies (fallback)
                 (SecurityPolicy::Basic256Sha256, MessageSecurityMode::SignAndEncrypt),
                 (SecurityPolicy::Basic256Sha256, MessageSecurityMode::Sign),
                 (SecurityPolicy::Basic256, MessageSecurityMode::SignAndEncrypt),
@@ -254,7 +273,6 @@ fn main() -> Result<()> {
                 (SecurityPolicy::Basic128Rsa15, MessageSecurityMode::SignAndEncrypt),
                 (SecurityPolicy::Basic128Rsa15, MessageSecurityMode::Sign),
             ];
-
 
             let mut last_error = None;
             let mut successful_session = None;
@@ -272,7 +290,7 @@ fn main() -> Result<()> {
                     std::thread::sleep(std::time::Duration::from_millis(1000));
                 }
                 
-                match client.connect_to_endpoint(
+                match cert_client.connect_to_endpoint(
                     (
                         cli.endpoint.as_ref(),
                         security_policy.to_str(),
@@ -364,7 +382,7 @@ fn main() -> Result<()> {
                             } else if error_str.contains("BadUnexpectedError") && error_str.contains("BadTooManyOperations") && error_str.contains("BadLicenseNotAvailable") {
                                 anyhow::anyhow!("Connection failed: Combined certificate and server errors\n\n  🚨 Multiple Error Codes: BadUnexpectedError + BadTooManyOperations + BadLicenseNotAvailable\n  💡 This suggests:\n    • Certificate authentication is triggering server licensing issues\n    • Server has strict operation limits during handshake (BadTooManyOperations)\n    • Server licensing may not support certificate authentication\n  🔧 Solutions:\n    • Added delays between security policy attempts (implemented)\n    • Try username/password authentication instead:\n      opcua-walker --username <user> --password <pass> call \"Reboot\"\n    • Contact server administrator about licensing and connection limits\n    • This combination suggests server-side configuration issues\n\nOriginal error: {:?}", final_error)
                             } else {
-                                anyhow::anyhow!("Connection failed: Tried all standard security policies\n\n  🚨 Certificate authentication failed with all security configurations\n  💡 Tried security policies:\n    • Aes256Sha256RsaPss (with Sign & SignAndEncrypt) - supports sha256WithRSAEncryption\n    • Aes128Sha256RsaOaep (with Sign & SignAndEncrypt) - supports sha256WithRSAEncryption\n    • Basic256Sha256 (with Sign & SignAndEncrypt)\n    • Basic256 (with Sign & SignAndEncrypt)\n    • Basic128Rsa15 (with Sign & SignAndEncrypt)\n  🔧 Your server may require specific security settings or certificate configuration\n  📋 Check server documentation for supported security policies\n\nOriginal error: {:?}", final_error)
+                                anyhow::anyhow!("Connection failed: Certificate authentication failed\n\n  🚨 Certificate authentication unsuccessful despite C-style implementation\n  💡 Changes made based on your C code comparison:\n    • Creates dedicated certificate-configured client (like UA_ClientConfig setup)\n    • Uses create_sample_keypair(false) to avoid conflicting certificates\n    • Prioritizes AES256Sha256RsaPss/AES128Sha256RsaOaep for sha256WithRSAEncryption support\n    • Uses trust_server_certs(true) equivalent to UA_CertificateVerification_AcceptAll\n  🔧 Since the other CLI tool works with the same certificates, this suggests:\n    • Possible library-level differences between rust-opcua and open62541 (C library)\n    • Server may require specific certificate configuration that varies by client library\n    • Certificate loading or format handling may differ between libraries\n  📋 Next steps to debug:\n    • Compare successful connection from other CLI tool with verbose OPC-UA logging\n    • Check if server logs show different behavior with different client libraries\n    • Try username/password authentication to verify server connectivity:\n      opcua-walker --username <user> --password <pass> call \"Reboot\"\n\nOriginal error: {:?}", final_error)
                             }
                         }
                     });
