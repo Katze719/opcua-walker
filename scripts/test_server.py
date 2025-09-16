@@ -61,6 +61,37 @@ class OPCUATestServer:
         await self.boolean_var.set_writable()
         await self.string_var.set_writable()
         
+        # Create test methods for testing method calling functionality
+        server_object = await objects.add_object(idx, 'ServerObject')
+        
+        # Add Reboot method
+        reboot_method = await server_object.add_method(
+            idx, 
+            'Reboot', 
+            self.reboot_method,
+            [], # input arguments
+            [] # output arguments  
+        )
+        
+        # Add AddNumbers method with input arguments
+        from asyncua import ua
+        add_numbers_method = await server_object.add_method(
+            idx,
+            'AddNumbers',
+            self.add_numbers_method,
+            [ua.VariantType.Int32, ua.VariantType.Int32], # two integer inputs
+            [ua.VariantType.Int32] # one integer output
+        )
+        
+        # Add ResetCounter method 
+        reset_counter_method = await server_object.add_method(
+            idx,
+            'ResetCounter', 
+            self.reset_counter_method,
+            [], # no input arguments
+            [ua.VariantType.String] # string output
+        )
+        
         logger.info("🏃 OPC-UA Test Server initialized")
         logger.info("📡 Endpoint: opc.tcp://localhost:4840/opcua/")
         logger.info("📊 Test variables created in namespace ns=2:")
@@ -71,12 +102,38 @@ class OPCUATestServer:
         logger.info("  • ns=2;s=Timestamp (String) - Current timestamp")
         logger.info("  • ns=2;s=Boolean (Boolean) - Alternating boolean")
         logger.info("  • ns=2;s=DynamicString (String) - Dynamic string")
+        logger.info("📞 Test methods created:")
+        logger.info("  • Reboot - Restart server (no arguments)")
+        logger.info("  • AddNumbers - Add two integers")
+        logger.info("  • ResetCounter - Reset counter to zero")
         logger.info("")
         logger.info("💡 Test with CLI:")
         logger.info("   ./target/release/opcua-walker info")
         logger.info("   ./target/release/opcua-walker browse")
         logger.info("   ./target/release/opcua-walker read \"ns=2;s=Counter\"")
+        logger.info("   ./target/release/opcua-walker call \"Reboot\"")
+        logger.info("   ./target/release/opcua-walker call \"AddNumbers\" --args \"5,10\"")
         logger.info("⏹️  Press Ctrl+C to stop server")
+        
+    async def reboot_method(self, parent):
+        """Simulated reboot method."""
+        logger.info("🔄 Reboot method called - simulating server restart...")
+        await self.status_var.write_value("Rebooting")
+        await asyncio.sleep(1)  # Simulate restart delay
+        await self.status_var.write_value("Running")
+        return []
+        
+    async def add_numbers_method(self, parent, a, b):
+        """Add two numbers and return the result."""
+        result = a + b
+        logger.info(f"➕ AddNumbers method called: {a} + {b} = {result}")
+        return [result]
+        
+    async def reset_counter_method(self, parent):
+        """Reset the counter variable to zero."""
+        logger.info("🔄 ResetCounter method called")
+        await self.counter_var.write_value(0)
+        return ["Counter reset to 0"]
         
     async def update_variables(self):
         """Update test variables with dynamic values."""

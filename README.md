@@ -7,6 +7,8 @@ A CLI tool written in Rust for exploring OPC-UA servers and their capabilities.
 - 🔍 **Server Discovery**: Discover OPC-UA server capabilities and available services
 - 📁 **Address Space Browser**: Browse the address space structure of OPC-UA servers
 - 📖 **Variable Reader**: Read values from specific variable nodes
+- 🔎 **Search by Name**: Find and read nodes by searching their display names
+- ⚡ **Method Calling**: Call methods on OPC-UA servers with arguments
 - ℹ️ **Server Info**: Display detailed server information and namespaces
 - 🎨 **Colored Output**: User-friendly, colored console output
 - 🔒 **Multiple Authentication Methods**: Support for Anonymous, Username/Password, and X.509 Certificate authentication
@@ -86,6 +88,8 @@ opcua-walker [OPTIONS] <COMMAND>
 - `discover`: Display server capabilities and available services
 - `browse`: Browse address space and show all available nodes  
 - `read <node-id>`: Read value of a specific variable
+- `read --search <name>`: Find and read nodes by searching their display names
+- `call <method-id> <object-id>`: Call a method on the server
 - `info`: Display server information and namespaces
 
 ### Options
@@ -123,6 +127,36 @@ opcua-walker browse --node "ns=1;i=1001" --depth 5
 ```bash
 opcua-walker read "ns=1;s=Temperature"
 opcua-walker read "ns=0;i=2258"  # Server.ServerStatus.CurrentTime
+```
+
+#### Search and Read by Name
+```bash
+# Search for nodes containing "Temperature" in their name
+opcua-walker read --search "Temperature"
+
+# Search for multiple terms
+opcua-walker read --search "Counter" "Pressure" "Status"
+
+# Search with all attributes
+opcua-walker read --search "Temperature" --all-attributes
+```
+
+#### Call Methods
+```bash
+# Call a method by name (auto-search for method and object)
+opcua-walker call "Reboot"
+
+# Call a method with exact node IDs
+opcua-walker call "ns=2;s=ResetCounter" "ns=2;s=CounterObject"
+
+# Call a method with arguments (auto-search)
+opcua-walker call "AddNumbers" --args "5,10"
+
+# Call with JSON arguments (exact IDs)
+opcua-walker call "ns=2;s=ProcessData" "ns=2;s=DataObject" --args '[42, "test"]'
+
+# Verbose output to see search details
+opcua-walker call "Reboot" --verbose
 ```
 
 #### Authentication Examples
@@ -216,6 +250,8 @@ The included Docker test server provides these test variables:
 - ✅ X.509 Certificate Authentication
 - ✅ Read Service
 - ✅ Browse Service
+- ✅ Method Call Service
+- ✅ Node Search by Name
 - ⏳ Write Service (planned)
 - ⏳ Subscription Service (planned)
 
@@ -343,6 +379,36 @@ Tested with:
 2. **Certificate errors**: Verify certificate and key files exist and are readable
 3. **Authentication failed**: Check username/password or certificate validity
 4. **Permission denied**: Ensure proper file permissions for certificate files
+
+### Method Calling Issues
+
+**Error: BadTooManyOperations**
+- The server is overwhelmed by browse operations during method search
+- **Solution**: Use exact node IDs instead of method names:
+  ```bash
+  opcua-walker call "ns=2;s=RebootMethod" "ns=2;s=ServerObject"
+  ```
+
+**Error: BadLicenseNotAvailable**
+- The server requires a license for method execution
+- **Solution**: Contact server administrator or check licensing requirements
+
+**Error: BadUnexpectedError**
+- The method may require specific arguments or have execution restrictions
+- **Solution**: Try with explicit arguments or check method signature:
+  ```bash
+  opcua-walker call "MethodName" --args '[arg1, arg2]'
+  ```
+
+**Method not found**
+- Use `browse` to explore available methods:
+  ```bash
+  opcua-walker browse --depth 3
+  ```
+- Try with `--verbose` for detailed search information:
+  ```bash
+  opcua-walker call "MethodName" --verbose
+  ```
 
 ### Debug Mode
 
